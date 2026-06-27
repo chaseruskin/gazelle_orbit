@@ -1,0 +1,9 @@
+[package]
+name = "gazelle_orbit"
+description = "A gazelle extension to produce VHDL rules and Verilog rules from Orbit files"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+cliproc = "2"
+orbit = { git = "https://github.com/UebelAndre/orbit.git", branch = "subcommand" }

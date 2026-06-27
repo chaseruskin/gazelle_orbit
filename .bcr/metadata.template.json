@@ -1,0 +1,18 @@
+{
+  "homepage": "https://github.com/chaseruskin/gazelle_orbit",
+  "maintainers": [
+    {
+        "email": "51766769+UebelAndre@users.noreply.github.com",
+        "github": "UebelAndre",
+        "name": "UebelAndre"
+    },
+    {
+        "email": "51766769+chaseruskin@users.noreply.github.com",
+        "github": "chaseruskin",
+        "name": "chaseruskin"
+    }
+  ],
+  "repository": ["github:chaseruskin/gazelle_orbit"],
+  "versions": [],
+  "yanked_versions": {}
+}
