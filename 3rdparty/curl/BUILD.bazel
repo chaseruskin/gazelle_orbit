@@ -1,0 +1,7 @@
+load(":curl.bzl", "curl_openssl")
+
+curl_openssl(
+    name = "curl",
+    target = "@curl",
+    visibility = ["//visibility:public"],
+)

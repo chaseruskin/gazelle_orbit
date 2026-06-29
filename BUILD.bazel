@@ -1,25 +1,11 @@
-load("@gazelle_orbit_crates//:defs.bzl", "aliases", "all_crate_deps")
-load("@rules_rust//rust:defs.bzl", "rust_binary")
+exports_files(["LICENSE"])
 
-exports_files([
-    "Cargo.toml",
-    "Cargo.lock",
-    "LICENSE",
-])
-
-rust_binary(
+# Surface the orbit CLI under a stable in-repo label. The binary itself is
+# defined in the http_archive overlay at //third_party/orbit:BUILD.orbit.bazel.
+alias(
     name = "orbit",
-    srcs = ["src/main.rs"],
-    aliases = aliases(),
-    crate_name = "orbit",
-    edition = "2024",
-    proc_macro_deps = all_crate_deps(proc_macro = True),
-    rustc_env = {
-        "CARGO_PKG_REPOSITORY": "https://github.com/chaseruskin/orbit",
-        "CARGO_PKG_VERSION": "0.29.1",
-    },
+    actual = "@orbit//:orbit",
     visibility = ["//visibility:public"],
-    deps = all_crate_deps(normal = True),
 )
 
 # Convenience alias so external consumers can refer to the gazelle binary as

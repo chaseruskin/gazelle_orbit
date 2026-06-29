@@ -32,19 +32,6 @@ build --incompatible_autoload_externally=
 common --lockfile_mode=off
 
 ###############################################################################
-## BCR curl SSL backend
-##
-## The BCR `curl` module defaults to BoringSSL, which is C++ and pulls in
-## libstdc++ symbols. Some toolchains (notably the bootlin cross-compilers
-## consumers may use under RBE) drop the C++ runtime in the wrong link
-## order, producing undefined references to `__gxx_personality_v0`,
-## `operator delete`, etc. We already ship OpenSSL via the `openssl`
-## bazel_dep — telling curl to use it avoids the C++ runtime entirely
-## (OpenSSL is pure C). Consumers inheriting our deps need this same flag
-## in their own bazelrc.
-common --@curl//:ssl_lib=openssl
-
-###############################################################################
 ## Custom user flags
 ##
 ## This should always be the last thing in the `.bazelrc` file to ensure

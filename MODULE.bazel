@@ -8,11 +8,27 @@ module(
 )
 
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
+bazel_dep(name = "rules_cc", version = "0.2.10")
 bazel_dep(name = "rules_rust", version = "0.71.1")
 bazel_dep(name = "openssl", version = "3.5.5.bcr.4")
 bazel_dep(name = "curl", version = "8.12.0.bcr.1")
 bazel_dep(name = "rules_go", version = "0.60.0")
 bazel_dep(name = "gazelle", version = "0.51.0")
+
+# orbit source — fetched as an http_archive instead of via a cargo git dep so
+# crate_universe doesn't need to invoke git_repository under the hood. The
+# overlay at //3rdparty/orbit:BUILD.orbit.bazel exposes orbit as both a
+# rust_library (so other Rust code can link against it) and a rust_binary
+# (the CLI the gazelle plugin embeds as a runfile).
+http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "http_archive")
+
+http_archive(
+    name = "orbit",
+    build_file = "//3rdparty/orbit:BUILD.orbit.bazel",
+    sha256 = "a2236f67bcccad2336a060de7d20dcb0686ae1771cbc9117d518e254b0073edf",
+    strip_prefix = "orbit-fcd981f0cbb19d7ddd2fe90dfb1862747546dbe3",
+    urls = ["https://github.com/UebelAndre/orbit/archive/fcd981f0cbb19d7ddd2fe90dfb1862747546dbe3.tar.gz"],
+)
 
 # Required by the `hdl_library` rule under //hdl: it composes both
 # providers (VhdlInfo + VerilogInfo) into a single mixed-language rule so
@@ -34,9 +50,9 @@ register_toolchains("@rust_toolchains//:all")
 crate = use_extension("@rules_rust//crate_universe:extensions.bzl", "crate")
 crate.from_cargo(
     name = "gazelle_orbit_crates",
-    cargo_lockfile = "//:Cargo.lock",
+    cargo_lockfile = "@orbit//:Cargo.lock",
     lockfile = "//:cargo-bazel-lock.json",
-    manifests = ["//:Cargo.toml"],
+    manifests = ["@orbit//:Cargo.toml"],
 )
 crate.annotation(
     # curl-sys ships libcurl's C source and normally builds it with cc-rs
@@ -46,6 +62,11 @@ crate.annotation(
     # build script suppresses the source compile + skips its pkg-config /
     # vendored-build dance; the `deps` entry below provides the link.
     #
+    # We don't link `@curl` directly — //3rdparty/curl wraps it in an
+    # outgoing transition that forces `--@curl//:ssl_lib=openssl`, so
+    # consumers don't have to set that flag themselves. See
+    # //3rdparty/curl/defs.bzl for the rationale.
+    #
     # Note: rules_rust currently emits a deprecation warning for cc_library
     # in `deps`, recommending `link_deps` instead. crate.annotation doesn't
     # yet support `link_deps` (only `deps` and `build_script_link_deps`),
@@ -54,9 +75,9 @@ crate.annotation(
     crate = "curl-sys",
     gen_build_script = "off",
     label_injections = {
-        "@curl": "@curl",
+        "@gazelle_orbit//3rdparty/curl": "@gazelle_orbit//3rdparty/curl",
     },
-    link_deps = ["@curl"],
+    link_deps = ["@gazelle_orbit//3rdparty/curl"],
     repositories = ["gazelle_orbit_crates"],
 )
 crate.annotation(

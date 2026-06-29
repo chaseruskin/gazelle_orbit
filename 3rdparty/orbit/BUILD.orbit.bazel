@@ -1,0 +1,52 @@
+"""BUILD overlay for the orbit source tree fetched via http_archive.
+
+Defines orbit's Rust library and CLI binary using crate_universe-resolved
+dependencies from the shared `gazelle_orbit_crates` repo. The orbit Cargo.toml
+at this archive's root is the manifest crate_universe was rooted at, so
+`all_crate_deps()` without an explicit package_name resolves to orbit's
+direct deps.
+"""
+
+load("@gazelle_orbit_crates//:defs.bzl", "aliases", "all_crate_deps")
+load("@rules_rust//rust:defs.bzl", "rust_binary", "rust_library")
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files([
+    "Cargo.toml",
+    "Cargo.lock",
+    "LICENSE",
+])
+
+rust_library(
+    name = "orbit_lib",
+    srcs = glob(
+        ["src/**/*.rs"],
+        exclude = [
+            "src/main.rs",
+            "src/bin/**",
+        ],
+    ),
+    aliases = aliases(),
+    crate_name = "orbit",
+    edition = "2024",
+    proc_macro_deps = all_crate_deps(proc_macro = True),
+    rustc_env = {
+        "CARGO_PKG_REPOSITORY": "https://github.com/chaseruskin/orbit",
+        "CARGO_PKG_VERSION": "0.29.2",
+    },
+    deps = all_crate_deps(normal = True),
+)
+
+rust_binary(
+    name = "orbit",
+    srcs = ["src/main.rs"],
+    aliases = aliases(),
+    crate_name = "orbit",
+    edition = "2024",
+    rustc_env = {
+        "CARGO_PKG_REPOSITORY": "https://github.com/chaseruskin/orbit",
+        "CARGO_PKG_VERSION": "0.29.2",
+    },
+    deps = all_crate_deps(normal = True) + [":orbit_lib"],
+)

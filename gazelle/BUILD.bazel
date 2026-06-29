@@ -16,11 +16,11 @@ go_library(
         "orbit.go",
         "resolve.go",
     ],
-    data = ["//:orbit"],
+    data = ["@orbit"],
     importpath = "github.com/chaseruskin/gazelle_orbit/gazelle",
     visibility = ["//visibility:public"],
     x_defs = {
-        "orbitBinRlocation": "$(rlocationpath //:orbit)",
+        "orbitBinRlocation": "$(rlocationpath @orbit//:orbit)",
     },
     deps = [
         "@gazelle//config",
