@@ -1,9 +1,14 @@
 name: Pipeline
 on:
   push:
+    branches: [main]
   pull_request:
   workflow_dispatch:
 
 jobs:
   bazel:
     uses: ./.github/workflows/bazel.yml
+  buildifier:
+    uses: ./.github/workflows/buildifier.yml
+  gofmt:
+    uses: ./.github/workflows/gofmt.yml

@@ -1,0 +1,32 @@
+name: Gofmt
+on:
+  workflow_call:
+
+jobs:
+  gofmt:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fetch repository
+        uses: actions/checkout@v6
+
+      - name: Setup Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.24.12'
+
+      # Fail if any Go source file is not gofmt-clean. Prints the offending
+      # files and their diffs so the fix is one `gofmt -w` away.
+      - name: Check Go formatting
+        run: |
+          unformatted=$(gofmt -l .)
+          if [[ -n "$unformatted" ]]; then
+            echo "The following files are not gofmt-clean:"
+            echo "$unformatted"
+            echo
+            echo "Diff:"
+            gofmt -d .
+            exit 1
+          fi

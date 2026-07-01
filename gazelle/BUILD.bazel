@@ -1,5 +1,5 @@
 load("@gazelle//:def.bzl", "gazelle_binary")
-load("@rules_go//go:def.bzl", "go_library")
+load("@rules_go//go:def.bzl", "go_library", "go_test")
 
 # The gazelle_orbit language plugin.
 #
@@ -31,6 +31,12 @@ go_library(
         "@gazelle//rule",
         "@rules_go//go/runfiles",
     ],
+)
+
+go_test(
+    name = "orbit_test",
+    srcs = ["orbit_test.go"],
+    embed = [":orbit"],
 )
 
 # gazelle_binary bundles our orbit language plugin into a Gazelle executable.

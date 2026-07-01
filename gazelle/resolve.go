@@ -1,7 +1,6 @@
 package orbit
 
 import (
-	"log"
 	"sort"
 	"strings"
 	"sync"
@@ -13,19 +12,21 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
-// HDL language tags used to drive Resolve-time cross-language detection.
-// A rule's language is the union of providers it emits: a `vhdl_library`
-// provides only `languageVhdl`; a `verilog_library` provides only
-// `languageVerilog`; an `hdl_library` may provide both.
+// HDL language tags used to drive Resolve-time cross-language routing.
+// A rule's language is derived from its kind: `vhdl_library` provides
+// `languageVhdl`, `verilog_library` provides `languageVerilog`. Cross-
+// language deps (where the consumer's language differs from the dep's)
+// get routed to `verilog_deps` (on vhdl_library) or `vhdl_deps` (on
+// verilog_library) rather than the plain `deps` attr.
 const (
 	languageVhdl    = "vhdl"
 	languageVerilog = "verilog"
 )
 
-// labelLanguages tracks which HDL language(s) each generated rule provides.
+// labelLanguages tracks which HDL language each generated rule provides.
 // Imports() writes to it for every plugin-managed rule it sees in the
 // workspace; Resolve() reads from it to classify the language of each
-// resolved dep label.
+// resolved dep label and route it to the appropriate deps attribute.
 //
 // Keys are normalized to "pkg:name" (no repo prefix) because Imports()
 // doesn't see the apparent repo name attached to its rules while Resolve()
@@ -38,7 +39,7 @@ const (
 // any Resolve() call runs, so by the time we read this map every relevant
 // entry is present. We use sync.Map so the Imports phase can run
 // concurrently across packages without an explicit mutex.
-var labelLanguages sync.Map // map[string]map[string]bool — "pkg:name" → set{"vhdl","verilog"}
+var labelLanguages sync.Map // map[string]string — "pkg:name" → "vhdl" | "verilog"
 
 // labelKey produces the normalized key used by labelLanguages — strips the
 // repo prefix so Imports-time and Resolve-time labels match regardless of
@@ -47,43 +48,40 @@ func labelKey(lbl label.Label) string {
 	return lbl.Pkg + ":" + lbl.Name
 }
 
-// recordLabelLanguages stores the set of languages a rule's label provides.
+// recordLabelLanguage stores the language a rule's label provides.
 // Called from Imports(); overwrites previous entries (idempotent on
-// re-resolve).
-func recordLabelLanguages(lbl label.Label, langs map[string]bool) {
-	if len(langs) == 0 {
+// re-resolve). Empty language is skipped so unknown-kind rules don't
+// pollute the index.
+func recordLabelLanguage(lbl label.Label, lang string) {
+	if lang == "" {
 		return
 	}
-	labelLanguages.Store(labelKey(lbl), langs)
+	labelLanguages.Store(labelKey(lbl), lang)
 }
 
-// lookupLabelLanguages returns the language set associated with lbl, or nil
-// if the label wasn't indexed (typically because it's an external label or
-// a hand-authored rule not in our codegen list).
-func lookupLabelLanguages(lbl label.Label) map[string]bool {
+// lookupLabelLanguage returns the language associated with lbl, or empty
+// string if the label wasn't indexed (typically because it's an external
+// label or a hand-authored rule not in our codegen list).
+func lookupLabelLanguage(lbl label.Label) string {
 	v, ok := labelLanguages.Load(labelKey(lbl))
 	if !ok {
-		return nil
+		return ""
 	}
-	return v.(map[string]bool)
+	return v.(string)
 }
 
-// languagesForKind returns the set of HDL languages a rule of the given
-// kind provides. For codegen kinds whose language is ambiguous from the
-// kind name (e.g. `verilog_system_rdl_library` is Verilog/SV; future
-// codegens may be VHDL), we conservatively return both languages — the
-// kind-upgrade heuristic in Resolve treats "unknown" as "matches the
-// consumer" so we never spuriously upgrade based on a codegen dep.
-func languagesForKind(kind string) map[string]bool {
+// languageForKind returns the HDL language a rule of the given kind
+// provides. Codegen kinds (e.g. `verilog_system_rdl_library` — Verilog/SV
+// output from SystemRDL) are also mapped here so their outputs are
+// classified correctly for cross-language routing decisions.
+func languageForKind(kind string) string {
 	switch kind {
 	case kindVhdlLibrary:
-		return map[string]bool{languageVhdl: true}
+		return languageVhdl
 	case kindVerilogLibrary, "verilog_system_rdl_library":
-		return map[string]bool{languageVerilog: true}
-	case kindHdlLibrary:
-		return map[string]bool{languageVhdl: true, languageVerilog: true}
+		return languageVerilog
 	default:
-		return nil
+		return ""
 	}
 }
 
@@ -129,17 +127,12 @@ type ruleImport struct {
 //     source is present, or always merged in alongside the others so the
 //     conventional case (one rule == one unit) needs no annotation.
 func (*orbitLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolve.ImportSpec {
-	// For vhdl_library the library name lives on the public `library` attr.
-	// For verilog_library (no such attr in rules_verilog), the plugin
-	// stashes it in a private attr at generation time. Hand-authored
-	// verilog_library rules that want to participate in library-qualified
-	// lookups can declare the name via `tags = ["orbit_library=<name>"]`.
+	// Both vhdl_library and verilog_library (rules_verilog v1.3.0+) have
+	// a public `library` attr. Hand-authored rules that predate the
+	// verilog_library.library attr — or targets that want a library name
+	// different from what's set on the rule — can still declare it via
+	// `tags = ["orbit_library=<name>"]` for backwards compatibility.
 	library := strings.ToLower(r.AttrString("library"))
-	if library == "" {
-		if priv, ok := r.PrivateAttr(libraryNameAttr).(string); ok {
-			library = strings.ToLower(priv)
-		}
-	}
 	if library == "" {
 		for _, tag := range r.AttrStrings("tags") {
 			if rest, ok := strings.CutPrefix(tag, tagOrbitLibraryPrefix); ok {
@@ -183,11 +176,8 @@ func (*orbitLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolv
 		}
 	}
 
-	// Record this rule's language set for Resolve-time cross-language
-	// detection. The plugin's `hdl_library` provides both; the
-	// single-language kinds provide just one; codegen kinds resolve via
-	// `languagesForKind` (currently Verilog/SV).
-	recordLabelLanguages(labelFromRule(r, f), languagesForKind(r.Kind()))
+	// Record this rule's language for Resolve-time cross-language routing.
+	recordLabelLanguage(labelFromRule(r, f), languageForKind(r.Kind()))
 
 	return specs
 }
@@ -213,60 +203,37 @@ func (*orbitLang) Imports(c *config.Config, r *rule.Rule, f *rule.File) []resolv
 // listed units) will resolve to this rule.
 const tagOrbitUnitPrefix = "orbit_unit="
 
-// tagOrbitLibraryPrefix declares the HDL library a hand-authored
-// verilog_library belongs to. rules_verilog's verilog_library has no public
-// `library` attribute (Verilog's source-level namespace is flat), so this
-// tag is the way to participate in library-qualified resolution.
-//
-// Example:
-//
-//	verilog_library(
-//	    name = "uart_regs",
-//	    srcs = [":uart_regs_verilog"],
-//	    tags = [
-//	        "orbit_library=uart_regs",
-//	        "orbit_unit=uart_regs_pkg",
-//	    ],
-//	)
+// tagOrbitLibraryPrefix declares the HDL library a hand-authored rule
+// belongs to. Kept for backward compatibility with rules that predate
+// rules_verilog's public `library` attr — new rules should just set
+// `library = "..."` directly.
 const tagOrbitLibraryPrefix = "orbit_library="
 
 // Resolve implements resolve.Resolver. For each import on the rule, we look
 // up a matching Bazel label (either from a configured stdlib mapping or by
-// querying the workspace index) and set the result on the rule's `deps`
-// attribute.
+// querying the workspace index) and route it to the appropriate deps
+// attribute based on cross-language classification:
 //
-// Resolve also performs the cross-language kind upgrade: if a rule was
-// initially generated as `vhdl_library` or `verilog_library` (based on its
-// own srcs language) but one of its resolved deps provides only the OTHER
-// language, the rule is rewritten to `hdl_library` in place. The
-// `hdl_library` rule's impl walks `[VhdlInfo]` and `[VerilogInfo]` on each
-// dep independently, so cross-language refs participate in the real
-// provider chain rather than the leaf-only `data = [...]` workaround.
+//   - Same-language deps → `deps` (vhdl_library.deps holds VhdlInfo entries;
+//     verilog_library.deps holds VerilogInfo entries).
+//   - Cross-language deps → `verilog_deps` on vhdl_library (VerilogInfo
+//     entries) or `vhdl_deps` on verilog_library (VhdlInfo entries).
+//
+// A dep with unknown language (external repo, hand-authored rule outside
+// our codegen list, or a codegen kind with no `languageForKind` mapping)
+// is conservatively routed to `deps` — the caller can hand-edit if that's
+// wrong.
 func (*orbitLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.RemoteCache, r *rule.Rule, imports interface{}, from label.Label) {
 	imps, ok := imports.([]ruleImport)
 	if !ok || len(imps) == 0 {
 		return
 	}
 
-	// If the BUILD file already has a single-language rule with this
-	// name, Resolve can't upgrade its kind (merger would reject the
-	// mismatch). In that case we DEFER cross-language deps too: writing
-	// a vhdl_library label into `verilog_library.deps` would fail
-	// `bazel build` with a VerilogInfo provider error, which is louder
-	// than a missing dep but blocks unrelated work. Better to log a
-	// one-line warning + skip the dep; the user upgrades the rule kind
-	// manually, re-runs gazelle, and the cross-language dep lands
-	// cleanly. Same-language deps still flow through normally.
-	upgradeLocked, _ := r.PrivateAttr(noKindUpgradeAttr).(bool)
-	ownLang := ownLanguageForKind(r.Kind())
+	ownLang := languageForKind(r.Kind())
 
-	depSet := map[string]bool{}
-	// Track the language profile of each resolved dep so we can decide
-	// whether this rule needs to be upgraded to `hdl_library`. Keyed by
-	// canonical absolute label string so we don't double-classify a dep
-	// that's referenced via multiple imports.
-	resolvedLangs := map[string]map[string]bool{}
-	deferredCrossLang := []label.Label{}
+	sameLangDeps := map[string]bool{}
+	crossLangDeps := map[string]bool{}
+	seenLabels := map[string]bool{}
 	for _, imp := range imps {
 		lbl, ok := resolveImport(c, ix, imp, from)
 		if !ok {
@@ -276,116 +243,63 @@ func (*orbitLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Remo
 			continue
 		}
 		absLbl := lbl.String()
-		if _, seen := resolvedLangs[absLbl]; !seen {
-			resolvedLangs[absLbl] = lookupLabelLanguages(lbl)
-		}
-		if upgradeLocked && ownLang != "" && hasCrossLanguageContribution(resolvedLangs[absLbl], ownLang) {
-			deferredCrossLang = append(deferredCrossLang, lbl)
+		if seenLabels[absLbl] {
 			continue
 		}
-		depSet[lbl.Rel(from.Repo, from.Pkg).String()] = true
-	}
-	for _, lbl := range deferredCrossLang {
-		log.Printf(
-			"gazelle_orbit: %s references %s across HDL languages but the BUILD "+
-				"file already declares a `%s` rule with this name; cannot wire the "+
-				"dep without upgrading the rule kind. Change it to `hdl_library` "+
-				"(load from `@gazelle_orbit//hdl:defs.bzl`) and re-run gazelle to "+
-				"pick up the cross-language dep.",
-			from.String(), lbl.String(), r.Kind(),
-		)
-	}
-	if len(depSet) == 0 {
-		return
-	}
-	deps := make([]string, 0, len(depSet))
-	for d := range depSet {
-		deps = append(deps, d)
-	}
-	sort.Strings(deps)
-	r.SetAttr("deps", deps)
+		seenLabels[absLbl] = true
 
-	maybeUpgradeKind(r, resolvedLangs)
+		depLang := lookupLabelLanguage(lbl)
+		relDep := lbl.Rel(from.Repo, from.Pkg).String()
+
+		// Route to the right attr:
+		//   - unknown ownLang (rare — e.g. hand-authored rule of an
+		//     unrecognized kind): stay conservative, use `deps`.
+		//   - unknown depLang (external or non-plugin rule): treat as
+		//     same-language — user can override.
+		//   - matching languages: `deps`.
+		//   - differing languages: cross-language attr.
+		if ownLang == "" || depLang == "" || depLang == ownLang {
+			sameLangDeps[relDep] = true
+		} else {
+			crossLangDeps[relDep] = true
+		}
+	}
+
+	if len(sameLangDeps) > 0 {
+		setSortedAttr(r, "deps", sameLangDeps)
+	}
+	if len(crossLangDeps) > 0 {
+		setSortedAttr(r, crossLangAttrFor(ownLang), crossLangDeps)
+	}
 }
 
-// ownLanguageForKind returns the single language a single-language plugin-
-// generated rule provides, or empty for kinds that span both (hdl_library)
-// or that the plugin doesn't manage.
-func ownLanguageForKind(kind string) string {
-	switch kind {
-	case kindVhdlLibrary:
-		return languageVhdl
-	case kindVerilogLibrary:
-		return languageVerilog
+// setSortedAttr writes the sorted keys of `set` to the rule's attribute
+// `attr`. Used for both `deps` and the cross-language attrs so the on-disk
+// ordering is deterministic across gazelle runs.
+func setSortedAttr(r *rule.Rule, attr string, set map[string]bool) {
+	out := make([]string, 0, len(set))
+	for d := range set {
+		out = append(out, d)
+	}
+	sort.Strings(out)
+	r.SetAttr(attr, out)
+}
+
+// crossLangAttrFor returns the attr name a rule with own-language `ownLang`
+// should use for cross-language deps.
+//   - a vhdl_library carries Verilog deps in `verilog_deps`
+//   - a verilog_library carries VHDL deps in `vhdl_deps`
+//
+// Empty `ownLang` falls back to `deps` (conservative — caller already
+// avoids cross-lang routing when ownLang is unknown).
+func crossLangAttrFor(ownLang string) string {
+	switch ownLang {
+	case languageVhdl:
+		return "verilog_deps"
+	case languageVerilog:
+		return "vhdl_deps"
 	default:
-		return ""
-	}
-}
-
-// hasCrossLanguageContribution reports whether the candidate language set
-// includes a language OTHER than `ownLang` — which means an upgrade to
-// `hdl_library` is required so the chain forwards that language to the
-// rule's consumers.
-//
-// Returning true for deps providing BOTH languages (e.g. an
-// `hdl_library`) is intentional: a `verilog_library` consuming an
-// `hdl_library` only forwards the `VerilogInfo` half via its own
-// `VerilogInfo.deps` depset; the VHDL chain dies there unless this rule
-// is upgraded to `hdl_library` so it propagates both providers.
-func hasCrossLanguageContribution(langs map[string]bool, ownLang string) bool {
-	if len(langs) == 0 {
-		return false
-	}
-	for lang := range langs {
-		if lang != ownLang {
-			return true
-		}
-	}
-	return false
-}
-
-// maybeUpgradeKind rewrites the rule to `hdl_library` if any resolved dep
-// provides only the language opposite to the rule's own. Same-language
-// deps (whether VHDL→VHDL or Verilog→Verilog) don't trigger an upgrade.
-// Deps with unknown language (external repos, hand-authored rules without
-// our plugin's marker) are treated as same-language matches so we never
-// upgrade based on incomplete information.
-//
-// When upgrading from `verilog_library` we promote the private
-// `_orbit_library` attribute to a public `library` attr since
-// `hdl_library` (unlike `verilog_library`) accepts `library` as a public
-// attribute that names the VHDL library its .vhd srcs compile into.
-//
-// `noKindUpgradeAttr`-flagged rules are skipped: gazelle's `merger.Match`
-// would reject a same-name-different-kind merge and silently drop the
-// rule's deps. The cross-language deps for these rules are already
-// deferred + warned in `Resolve` itself, so this is a quiet no-op here.
-func maybeUpgradeKind(r *rule.Rule, resolvedLangs map[string]map[string]bool) {
-	currentKind := r.Kind()
-	if currentKind == kindHdlLibrary {
-		// Already mixed-capable — nothing to upgrade.
-		return
-	}
-	if locked, _ := r.PrivateAttr(noKindUpgradeAttr).(bool); locked {
-		return
-	}
-	ownLang := ownLanguageForKind(currentKind)
-	if ownLang == "" {
-		// Unknown / non-plugin-generated kind — leave alone.
-		return
-	}
-
-	for _, langs := range resolvedLangs {
-		if !hasCrossLanguageContribution(langs, ownLang) {
-			continue
-		}
-		r.SetKind(kindHdlLibrary)
-		if currentKind == kindVerilogLibrary {
-			if priv, ok := r.PrivateAttr(libraryNameAttr).(string); ok && priv != "" {
-				r.SetAttr("library", priv)
-			}
-		}
-		return
+		return "deps"
 	}
 }
 

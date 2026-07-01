@@ -1,6 +1,7 @@
 package orbit
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -24,11 +25,13 @@ var (
 // Each bucket's `kind` is decided up front from the srcs' file extensions:
 //   - all `.vhd` / `.vhdl` → `vhdl_library`
 //   - all `.v` / `.sv` → `verilog_library`
-//   - mixed extensions in one bucket → `hdl_library`
-//
-// A bucket initially generated as a single-language rule may still be
-// upgraded to `hdl_library` at Resolve time if any resolved dep turns out
-// to belong to the other language (see Resolve() in resolve.go).
+//   - mixed extensions in one srcs bucket → error (should not happen in
+//     practice; each design unit's sources are always single-language and
+//     buckets are keyed by srcs, so a mixed bucket would imply two units
+//     with different-language srcs sharing an identical srcs list — a
+//     contradiction). Cross-language DEPENDENCIES between rules are the
+//     interesting case and are handled in Resolve() by routing to the
+//     dedicated `verilog_deps` / `vhdl_deps` attrs.
 type ruleBucket struct {
 	ruleName string
 	kind     string
@@ -116,9 +119,10 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 			library = cfg.libraryName
 		}
 		// Bucket by (library, srcs) only — kind is derived from srcs
-		// extensions after bucketing so a single bucket whose srcs span
-		// both languages becomes one `hdl_library` rather than splitting
-		// into two redundant targets.
+		// extensions after bucketing. Mixed-language srcs in a single
+		// bucket is a hard error (see `kindFromSrcs`) — each design unit's
+		// sources are always single-language in practice, so a mixed
+		// bucket only arises from a corrupt/unexpected orbit report.
 		key := library + "|" + strings.Join(localSrcs, ",")
 		b, ok := buckets[key]
 		if !ok {
@@ -136,19 +140,12 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 	result := language.GenerateResult{}
 	for _, k := range bucketOrder {
 		b := buckets[k]
-		b.kind = kindFromSrcs(b.srcs)
-		if b.kind == "" {
-			// Bucket had no recognized HDL extensions — skip.
+		kind, err := kindFromSrcs(b.srcs)
+		if err != nil {
+			log.Printf("gazelle_orbit: %s/%s: %v", args.Rel, b.ruleName, err)
 			continue
 		}
-		// Honor a user's prior manual upgrade: if the BUILD file already
-		// declares this rule as `hdl_library`, keep generating it as
-		// `hdl_library` even if srcs are single-language. Otherwise the
-		// gen rule's kind wouldn't match the existing kind and merger
-		// would reject it the same way a Resolve-time upgrade does.
-		if existing := findExistingRuleByName(args.File, b.ruleName); existing != nil && existing.Kind() == kindHdlLibrary {
-			b.kind = kindHdlLibrary
-		}
+		b.kind = kind
 		r := rule.NewRule(b.kind, b.ruleName)
 		r.SetAttr("srcs", b.srcs)
 		// HDL libraries are almost always consumed across packages
@@ -163,29 +160,11 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		// "\bgazelle_orbit\b", //...)'`). User-added tags survive
 		// because we union-merge with what's already on the rule.
 		r.SetAttr("tags", mergeOrbitTag(existingTagsForRule(args.File, b.ruleName)))
-		// Record whether the BUILD file already has a rule with this
-		// name. If it does, Resolve must NOT upgrade the kind
-		// (`verilog_library` → `hdl_library` on cross-language dep)
-		// because gazelle's `merger.Match` rejects same-name-different-
-		// kind pairs and would silently drop the deps update entirely.
-		// Resolve instead logs a one-line warning so the user can hand-
-		// migrate the rule kind, after which subsequent gazelle runs
-		// merge cleanly.
-		if findExistingRuleByName(args.File, b.ruleName) != nil {
-			r.SetPrivateAttr(noKindUpgradeAttr, true)
-		}
-		// VHDL and mixed-language libraries get an explicit `library = ...`
-		// attribute. `verilog_library` has no public `library` attr
-		// (rules_verilog: Verilog's source-level namespace is flat); we
-		// stash the project's HDL library name in a private attr so
-		// Imports() can still index `<library>.<unit>`-qualified refs and
-		// so a later Resolve-time upgrade to `hdl_library` can promote it
-		// to a public attr.
-		if b.kind == kindVerilogLibrary {
-			r.SetPrivateAttr(libraryNameAttr, b.library)
-		} else {
-			r.SetAttr("library", b.library)
-		}
+		// Both `vhdl_library` and `verilog_library` (rules_verilog v1.3.0+)
+		// have a public `library` attr. Set it uniformly on every rule so
+		// consumers that read the library name off the rule find it in the
+		// same place regardless of language.
+		r.SetAttr("library", b.library)
 		// Stash the list of design-unit names this rule provides so
 		// Imports() can index each one independently. Gazelle preserves
 		// private attrs but never writes them to the BUILD file.
@@ -199,9 +178,10 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 }
 
 // kindFromSrcs decides the rule kind for a bucket from the file extensions
-// in its srcs. Mixed-language buckets become `hdl_library` so the unified
-// rule's provider partitioning handles both languages from one target.
-func kindFromSrcs(srcs []string) string {
+// in its srcs. Returns an error for mixed-language buckets (see the note on
+// `ruleBucket`) — the caller should log-and-skip so a corrupt orbit report
+// doesn't derail the whole gazelle run.
+func kindFromSrcs(srcs []string) (string, error) {
 	hasVhdl := false
 	hasVerilog := false
 	for _, s := range srcs {
@@ -214,20 +194,25 @@ func kindFromSrcs(srcs []string) string {
 	}
 	switch {
 	case hasVhdl && hasVerilog:
-		return kindHdlLibrary
+		return "", fmt.Errorf(
+			"srcs mix VHDL and Verilog/SV in a single design-unit bucket (%v); "+
+				"expected each unit's sources to be single-language. Cross-language "+
+				"deps between separate rules are handled by verilog_deps / vhdl_deps "+
+				"at Resolve time — split the unit into per-language srcs or file an "+
+				"issue if this came from a legitimate orbit report",
+			srcs,
+		)
 	case hasVhdl:
-		return kindVhdlLibrary
+		return kindVhdlLibrary, nil
 	case hasVerilog:
-		return kindVerilogLibrary
+		return kindVerilogLibrary, nil
 	default:
-		return ""
+		return "", fmt.Errorf("no recognized HDL srcs in bucket %v", srcs)
 	}
 }
 
 // hasSupportedLanguage reports whether orbit's reported language string is
-// one we can map to a Bazel rule. Replaces the old `kindForLanguage`
-// helper — kind is now derived from srcs extensions, not the per-unit
-// language string.
+// one we can map to a Bazel rule.
 func hasSupportedLanguage(lang string) bool {
 	switch strings.ToLower(lang) {
 	case "vhdl", "verilog", "systemverilog":
@@ -236,11 +221,6 @@ func hasSupportedLanguage(lang string) bool {
 		return false
 	}
 }
-
-// libraryNameAttr is the private attribute key used to stash the HDL library
-// name on Verilog rules (where there is no public `library` attribute to
-// read it from).
-const libraryNameAttr = "_orbit_library"
 
 // orbitTag is the bare tag value attached to every plugin-generated rule.
 // Distinct from the prefixed tags (`orbit_library=…`, `orbit_unit=…`) that
@@ -292,12 +272,6 @@ func unitNamesIn(b *ruleBucket) []string {
 // unitNamesAttr is the private attribute key used to stash the bucket's
 // design-unit names on each generated rule.
 const unitNamesAttr = "_orbit_unit_names"
-
-// noKindUpgradeAttr marks a generated rule whose name already exists in
-// the BUILD file. Resolve checks this flag before attempting a kind
-// upgrade — when the flag is set, Resolve emits a warning and leaves the
-// kind alone so the merger doesn't reject the rule and drop its deps.
-const noKindUpgradeAttr = "_orbit_no_kind_upgrade"
 
 // findExistingRuleByName returns the existing rule of the given name in
 // the BUILD file, or nil if none exists.

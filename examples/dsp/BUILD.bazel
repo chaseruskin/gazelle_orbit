@@ -3,6 +3,7 @@ load("@rules_verilog//verilog:defs.bzl", "verilog_library")
 verilog_library(
     name = "dsp_top",
     srcs = ["dsp_top.sv"],
+    library = "dsp",
     tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = [
@@ -15,6 +16,7 @@ verilog_library(
 verilog_library(
     name = "multiplier",
     srcs = ["multiplier.v"],
+    library = "dsp",
     tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = ["//vutils:reg_n"],

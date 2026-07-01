@@ -1,0 +1,34 @@
+name: Buildifier
+on:
+  workflow_call:
+
+env:
+  # Pinned for CI determinism; bump alongside any required new lints.
+  BUILDIFIER_VERSION: 8.5.1
+
+jobs:
+  buildifier:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Fetch repository
+        uses: actions/checkout@v6
+
+      - name: Install buildifier
+        run: |
+          curl -fsSL -o "$RUNNER_TEMP/buildifier" \
+            "https://github.com/bazelbuild/buildtools/releases/download/v${BUILDIFIER_VERSION}/buildifier-linux-amd64"
+          chmod +x "$RUNNER_TEMP/buildifier"
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          "$RUNNER_TEMP/buildifier" --version
+
+      # Validate every BUILD/.bzl/MODULE/WORKSPACE file in the repo is
+      # buildifier-clean (formatting + the full set of lint warnings).
+      # The gazelle plugin writes through buildifier's AST, so its output
+      # is expected to pass with zero diffs and zero warnings; this check
+      # guards against regressions in that contract. Buildifier's `-r .`
+      # skips bazel-* convenience symlinks and hidden directories.
+      - name: Lint with buildifier
+        run: buildifier -lint=warn -mode=check -warnings=all -r .

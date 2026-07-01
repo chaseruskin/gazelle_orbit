@@ -9,13 +9,13 @@ import (
 
 const languageName = "orbit"
 
-// Rule kinds we generate. Single-language packages get the matching
-// `vhdl_library` / `verilog_library`; packages with mixed-language srcs or
-// (detected at Resolve time) cross-language deps get the unified
-// `hdl_library`, which provides VhdlInfo and VerilogInfo simultaneously
-// from one rule.
+// Rule kinds we generate. Every plugin-generated rule is exactly one of
+// `vhdl_library` or `verilog_library`, chosen from the file extensions of
+// its srcs bucket. Cross-language dependencies are wired via the
+// `verilog_deps` (on vhdl_library) and `vhdl_deps` (on verilog_library)
+// attributes rather than through a third mixed-language rule kind — see
+// the Resolve() path for the routing logic.
 const (
-	kindHdlLibrary     = "hdl_library"
 	kindVhdlLibrary    = "vhdl_library"
 	kindVerilogLibrary = "verilog_library"
 )
@@ -25,7 +25,7 @@ const (
 // generate or merge these. Users authoring rules of these kinds can attach
 // `tags = ["orbit_library=...", "orbit_unit=..."]` to participate in
 // gazelle_orbit's workspace-wide dependency resolution without an extra
-// vhdl_library / verilog_library / hdl_library wrapper.
+// vhdl_library / verilog_library wrapper.
 //
 // Each entry is treated as a read-only library kind: Imports() runs on it
 // (so the rule shows up in the index), but GenerateRules() never produces
@@ -48,10 +48,7 @@ func NewLanguage() language.Language {
 func (*orbitLang) Name() string { return languageName }
 
 // generatedKindInfo is the shared KindInfo we use for every kind the plugin
-// generates and manages. Same shape for `vhdl_library`, `verilog_library`,
-// and `hdl_library` — each kind has a `library` attr (verilog_library
-// doesn't *publicly*, but a Resolve-time upgrade may promote a stashed
-// private value to a public `library` if it becomes `hdl_library`).
+// generates and manages. Same shape for `vhdl_library` and `verilog_library`.
 //
 // `MatchAttrs` deliberately includes only `srcs`, not `library`. The match
 // algorithm requires each attribute to either find exactly one candidate
@@ -59,7 +56,7 @@ func (*orbitLang) Name() string { return languageName }
 // `k2space`-library package shares the same value), so listing it would
 // fail every match with "multiple rules have the same attribute" and the
 // generated rule would be silently dropped instead of appended as a new
-// target. `srcs` is unique per rule (one file per `vhdl_library`/
+// target. `srcs` is unique per rule (one file per `vhdl_library` /
 // `verilog_library` convention) so it's a safe disambiguator.
 var generatedKindInfo = rule.KindInfo{
 	MatchAny:   false,
@@ -69,9 +66,11 @@ var generatedKindInfo = rule.KindInfo{
 	},
 	SubstituteAttrs: map[string]bool{},
 	MergeableAttrs: map[string]bool{
-		"srcs":    true,
-		"deps":    true,
-		"library": true,
+		"srcs":         true,
+		"deps":         true,
+		"verilog_deps": true, // cross-language on vhdl_library
+		"vhdl_deps":    true, // cross-language on verilog_library
+		"library":      true,
 		// `tags` is mergeable so the gen-rule's value (which already
 		// includes a union of the existing tags + the `gazelle_orbit`
 		// marker — see mergeOrbitTag in generate.go) overwrites the on-
@@ -81,7 +80,9 @@ var generatedKindInfo = rule.KindInfo{
 		"tags": true,
 	},
 	ResolveAttrs: map[string]bool{
-		"deps": true,
+		"deps":         true,
+		"verilog_deps": true,
+		"vhdl_deps":    true,
 	},
 }
 
@@ -90,7 +91,6 @@ func (*orbitLang) Kinds() map[string]rule.KindInfo {
 	kinds := map[string]rule.KindInfo{
 		kindVhdlLibrary:    generatedKindInfo,
 		kindVerilogLibrary: generatedKindInfo,
-		kindHdlLibrary:     generatedKindInfo,
 	}
 	// Read-only kinds: Gazelle will call Imports() on rules of these kinds
 	// (letting the workspace-wide index see them) but the plugin won't
@@ -115,16 +115,14 @@ func (l *orbitLang) Loads() []rule.LoadInfo {
 }
 
 // ApparentLoads implements language.ModuleAwareLanguage. We emit load
-// statements for the three rule kinds the plugin manages:
+// statements for the two rule kinds the plugin manages:
 //   - `vhdl_library` from `@rules_vhdl//vhdl:defs.bzl`
 //   - `verilog_library` from `@rules_verilog//verilog:defs.bzl`
-//   - `hdl_library` from `@gazelle_orbit//hdl:defs.bzl`
 //
 // Gazelle only writes the loads that match kinds actually present in the
-// file, so a single-language BUILD ends up with one load and an
-// hdl_library BUILD ends up with one (or two — see the cross-language
-// upgrade path in resolve.go that can flip a verilog_library into an
-// hdl_library after Resolve runs).
+// file, so a single-language BUILD ends up with one load and a mixed-
+// language BUILD (post-refactor: two separate rules of different kinds,
+// wired via `verilog_deps` / `vhdl_deps`) ends up with two.
 func (*orbitLang) ApparentLoads(moduleToApparentName func(string) string) []rule.LoadInfo {
 	rulesVhdl := moduleToApparentName("rules_vhdl")
 	if rulesVhdl == "" {
@@ -133,10 +131,6 @@ func (*orbitLang) ApparentLoads(moduleToApparentName func(string) string) []rule
 	rulesVerilog := moduleToApparentName("rules_verilog")
 	if rulesVerilog == "" {
 		rulesVerilog = "rules_verilog"
-	}
-	gazelleOrbit := moduleToApparentName("gazelle_orbit")
-	if gazelleOrbit == "" {
-		gazelleOrbit = "gazelle_orbit"
 	}
 	return []rule.LoadInfo{
 		{
@@ -147,16 +141,12 @@ func (*orbitLang) ApparentLoads(moduleToApparentName func(string) string) []rule
 			Name:    "@" + rulesVerilog + "//verilog:defs.bzl",
 			Symbols: []string{kindVerilogLibrary},
 		},
-		{
-			Name:    "@" + gazelleOrbit + "//hdl:defs.bzl",
-			Symbols: []string{kindHdlLibrary},
-		},
 	}
 }
 
-// Fix implements language.Language. No-op for now — single-language rules
-// stay single-language until Resolve detects a cross-language dep and
-// upgrades the rule in place to `hdl_library`.
+// Fix implements language.Language. No-op: cross-language deps now go to
+// dedicated attrs (verilog_deps / vhdl_deps) so there's no rule-kind
+// upgrade to perform.
 func (*orbitLang) Fix(c *config.Config, f *rule.File) {}
 
 // Embeds implements resolve.Resolver. HDL rules don't embed each other.

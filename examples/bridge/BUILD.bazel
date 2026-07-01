@@ -1,10 +1,15 @@
-load("@gazelle_orbit//hdl:defs.bzl", "hdl_library")
+load("@rules_verilog//verilog:defs.bzl", "verilog_library")
 
-hdl_library(
+# Cross-language: this SV wrapper deps on a VHDL entity in //primitives.
+# The dep goes into `vhdl_deps` (walked by verilog_library into
+# `VerilogInfo.vhdl_deps`) rather than through a mixed-language rule
+# kind — same mechanism the plugin's Resolve routes cross-language
+# deps through automatically.
+verilog_library(
     name = "and_wrapper",
     srcs = ["and_wrapper.sv"],
     library = "bridge",
     tags = ["gazelle_orbit"],
+    vhdl_deps = ["//primitives:and_gate"],
     visibility = ["//visibility:public"],
-    deps = ["//primitives:and_gate"],
 )
