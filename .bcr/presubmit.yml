@@ -1,5 +1,5 @@
 bcr_test_module:
-  module_path: "examples/bazel"
+  module_path: "examples"
   matrix:
     platform:
       - "macos_arm64"

@@ -1,0 +1,7 @@
+# {version}
+
+```python
+bazel_dep(name = "gazelle_orbit", version = "{version}")
+```
+
+Additional documentation can be found at: https://github.com/chaseruskin/gazelle_orbit

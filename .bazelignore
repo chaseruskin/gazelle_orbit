@@ -1,5 +1,5 @@
 bazel-bin
-bazel-orbit
+bazel-gazelle_orbit
 bazel-out
 bazel-testlogs
 target

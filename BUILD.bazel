@@ -1,4 +1,8 @@
-exports_files(["LICENSE"])
+exports_files([
+    "LICENSE",
+    "MODULE.bazel",
+    "version.bzl",
+])
 
 alias(
     name = "orbit",

@@ -1,0 +1,119 @@
+---
+name: Release
+on:
+  workflow_dispatch:
+  pull_request:
+    branches:
+      - main
+    paths:
+      # Run the release workflow on PRs that touch its scaffolding so
+      # changes get a dry-run before they land on `main`.
+      - version.bzl
+      - .github/workflows/release.yaml
+      - .github/workflows/release_prep.sh
+  push:
+    branches:
+      - main
+    paths:
+      # Only fire a real release when version.bzl is bumped.
+      - version.bzl
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  BAZEL_STARTUP_FLAGS: --bazelrc=${{ github.workspace }}/.github/github.bazelrc
+
+jobs:
+  # Reject the release up front if the target tag already exists on the
+  # remote. Same guard as rules_rust uses — saves a partially-published
+  # release if version.bzl wasn't bumped before merge.
+  validation:
+    if: ${{ github.repository_owner == 'chaseruskin' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure release does not already exist
+        if: startsWith(github.ref, 'refs/heads/main')
+        run: |
+          git fetch origin &> /dev/null
+          version="$(grep 'VERSION =' ${{ github.workspace }}/version.bzl | sed 's/VERSION = "//' | sed 's/"//')"
+          if [[ -n "$(git tag -l ${version})" ]]; then
+            echo "A release '${version}' already exists." >&2
+            exit 1
+          else
+            echo "Tag '${version}' will be created"
+          fi
+
+  # Create and push the version tag at the resolved commit before the
+  # release_ruleset workflow runs — that workflow checks out the
+  # repository at `tag_name`, so the tag must exist first.
+  tag:
+    if: ${{ github.repository_owner == 'chaseruskin' && (github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && startsWith(github.ref, 'refs/heads/main'))) }}
+    needs: validation
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    outputs:
+      tag: ${{ steps.create_tag.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Create and push tag
+        id: create_tag
+        run: |
+          set -euo pipefail
+          version="$(grep 'VERSION =' ${{ github.workspace }}/version.bzl | sed 's/VERSION = "//' | sed 's/"//')"
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # Pin the tag to the resolved SHA so a concurrent merge to
+          # main can't shift the release contents out from under us.
+          git tag -a "${version}" -m "gazelle_orbit ${version}" "${{ github.sha }}"
+          git push origin "${version}"
+          echo "tag=${version}" >> $GITHUB_OUTPUT
+
+  # Delegate the source archive build + attestation + GitHub release
+  # creation to the bazel-contrib reusable workflow. BCR's verifier
+  # specifically trusts attestations whose builder ID points at this
+  # reusable workflow path; rolling our own `actions/attest-build-provenance`
+  # would produce a valid SLSA attestation that BCR would still reject.
+  #
+  # `release_prep.sh` at `.github/workflows/release_prep.sh` is the
+  # hardcoded build hook — it gets `${tag_name}` as `$1`, must write
+  # release notes to stdout, and must produce files matching the
+  # `release_files` glob in cwd.
+  release:
+    needs: tag
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    uses: bazel-contrib/.github/.github/workflows/release_ruleset.yaml@v7.6.0
+    with:
+      # CI already ran the full test matrix on the PR that bumped
+      # version.bzl, and this reusable workflow runs on a single
+      # ubuntu-latest. Skip the default `bazel test //...` here.
+      bazel_test_command: "bazel info release"
+      release_files: gazelle_orbit-*.tar.gz
+      prerelease: false
+      tag_name: ${{ needs.tag.outputs.tag }}
+
+  # Re-publish to the Bazel Central Registry, carrying the
+  # build-provenance attestation produced upstream.
+  bcr-publish:
+    needs: [tag, release]
+    permissions:
+      contents: write
+      # `id-token: write` + `attestations: write` propagate down so the
+      # reusable `publish-to-bcr` workflow can read the attestation
+      # from the GitHub Attestation Store and attach it to the
+      # registry PR.
+      id-token: write
+      attestations: write
+    uses: ./.github/workflows/bcr-publish.yaml
+    with:
+      release_version: ${{ needs.tag.outputs.tag }}
+    secrets:
+      BCR_PUBLISH_TOKEN: ${{ secrets.BCR_PUBLISH_TOKEN }}

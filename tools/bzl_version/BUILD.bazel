@@ -1,0 +1,16 @@
+load("@rules_go//go:def.bzl", "go_test")
+
+# Enforces that version.bzl (release pipeline source of truth) and the
+# module() version in MODULE.bazel stay locked together. Bump both when
+# cutting a release.
+go_test(
+    name = "version_test",
+    srcs = ["version_test.go"],
+    data = [
+        "//:MODULE.bazel",
+        "//:version.bzl",
+    ],
+    deps = [
+        "@rules_go//go/runfiles",
+    ],
+)
