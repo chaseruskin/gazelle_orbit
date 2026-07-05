@@ -265,18 +265,24 @@ func (*orbitLang) Resolve(c *config.Config, ix *resolve.RuleIndex, rc *repo.Remo
 		}
 	}
 
-	if len(sameLangDeps) > 0 {
-		setSortedAttr(r, "deps", sameLangDeps)
-	}
-	if len(crossLangDeps) > 0 {
-		setSortedAttr(r, crossLangAttrFor(ownLang), crossLangDeps)
-	}
+	// Always write both deps attrs — even when empty — so a dep that
+	// resolved on a previous run and no longer resolves gets removed
+	// instead of surviving as a stale entry. Gazelle's ResolveAttrs
+	// contract expects the plugin to publish the full set on every call.
+	setOrDelSortedAttr(r, "deps", sameLangDeps)
+	setOrDelSortedAttr(r, crossLangAttrFor(ownLang), crossLangDeps)
 }
 
-// setSortedAttr writes the sorted keys of `set` to the rule's attribute
-// `attr`. Used for both `deps` and the cross-language attrs so the on-disk
-// ordering is deterministic across gazelle runs.
-func setSortedAttr(r *rule.Rule, attr string, set map[string]bool) {
+// setOrDelSortedAttr writes the sorted keys of `set` to the rule's
+// attribute `attr` when non-empty, and deletes the attribute otherwise.
+// Deleting on empty (rather than writing `attr = []`) both keeps the
+// on-disk BUILD file clean and clears stale values left by a previous
+// resolve.
+func setOrDelSortedAttr(r *rule.Rule, attr string, set map[string]bool) {
+	if len(set) == 0 {
+		r.DelAttr(attr)
+		return
+	}
 	out := make([]string, 0, len(set))
 	for d := range set {
 		out = append(out, d)
