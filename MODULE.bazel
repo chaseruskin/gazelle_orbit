@@ -27,9 +27,9 @@ http_archive = use_repo_rule("@bazel_tools//tools/build_defs/repo:http.bzl", "ht
 http_archive(
     name = "orbit",
     build_file = "//3rdparty/orbit:BUILD.orbit.bazel",
-    sha256 = "a2236f67bcccad2336a060de7d20dcb0686ae1771cbc9117d518e254b0073edf",
-    strip_prefix = "orbit-fcd981f0cbb19d7ddd2fe90dfb1862747546dbe3",
-    urls = ["https://github.com/UebelAndre/orbit/archive/fcd981f0cbb19d7ddd2fe90dfb1862747546dbe3.tar.gz"],
+    integrity = "sha256-QoYZB0m6JrySeZ80ReGPRURRYWvI3QIyspFBy/8t0bQ=",
+    strip_prefix = "orbit-48b93aa5190955d612d9fa36b123d158708f6876",
+    urls = ["https://github.com/chaseruskin/orbit/archive/48b93aa5190955d612d9fa36b123d158708f6876.tar.gz"],
 )
 
 # Rust toolchain (1.89.0 is the minimum — orbit uses std::fs file_lock APIs stabilized there).
