@@ -7,9 +7,14 @@ verilog_library(
     tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = [
-        ":multiplier",
-        "//uart_regs",
+        # PeakRDL emits uart_regs.sv + uart_regs_pkg.sv at build time;
+        # orbit runs at gazelle time and can't see them, so the
+        # `import uart_regs_pkg::*` and `uart_regs u_regs(...)` refs
+        # in dsp_top.sv produce no blueprint dep. `# keep` pins this
+        # entry so Gazelle's merger preserves it across regens.
+        "//uart_regs",  # keep
         "//vutils:counter",
+        ":multiplier",
     ],
 )
 

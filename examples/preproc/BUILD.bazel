@@ -1,0 +1,35 @@
+load("@bazel_skylib//rules:write_file.bzl", "write_file")
+load("@rules_verilog//verilog:defs.bzl", "verilog_library")
+
+# Bazel-only helper package: `write_file` produces `params.svh` at build
+# time. There is no HDL on disk here at gazelle-run time, so orbit can't
+# see the generated file. Downstream consumers that `` `include`` it
+# reference no design unit (an include is preprocessor-level, not a
+# module/package reference), so gazelle_orbit has nothing to resolve —
+# consumers pin the dep by hand with `# keep`. See //cpu:timer for the
+# concrete consumer.
+#
+# `# gazelle:orbit_disable true` keeps gazelle_orbit from trying to run
+# orbit on a package with no Orbit.toml (which would produce a noisy log
+# line every regen).
+
+# gazelle:orbit_disable true
+
+write_file(
+    name = "params_svh",
+    out = "params.svh",
+    content = [
+        "`ifndef PARAMS_SVH",
+        "`define PARAMS_SVH",
+        "`define GEN_WIDTH 8",
+        "`endif  // PARAMS_SVH",
+    ],
+    newline = "unix",
+)
+
+verilog_library(
+    name = "params",
+    hdrs = [":params_svh"],
+    library = "preproc",
+    visibility = ["//visibility:public"],
+)

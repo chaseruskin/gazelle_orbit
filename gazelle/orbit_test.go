@@ -1,57 +1,48 @@
 package orbit
 
 import (
+	"encoding/json"
 	"reflect"
 	"testing"
 )
 
-func TestPathDepRegex(t *testing.T) {
-	cases := []struct {
-		name     string
-		manifest string
-		want     []string
-	}{
+func TestBlueprintUnmarshal(t *testing.T) {
+	raw := []byte(`[
+  {
+    "fileset": "VLOG",
+    "library": "vutils",
+    "filepath": "/tmp/vutils/counter.v",
+    "dependencies": [
+      "/tmp/vutils/reg_n.v"
+    ]
+  },
+  {
+    "fileset": "VHDL",
+    "library": "gates",
+    "filepath": "/tmp/gates/or_gate.vhd",
+    "dependencies": []
+  }
+]`)
+
+	var got []BlueprintEntry
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal failed: %v", err)
+	}
+	want := []BlueprintEntry{
 		{
-			name:     "no deps",
-			manifest: `[package]` + "\n" + `name = "root"`,
-			want:     nil,
+			Fileset:      "VLOG",
+			Library:      "vutils",
+			Filepath:     "/tmp/vutils/counter.v",
+			Dependencies: []string{"/tmp/vutils/reg_n.v"},
 		},
 		{
-			name: "single path dep",
-			manifest: `[dependencies]` + "\n" +
-				`gates = { path = "../gates" }`,
-			want: []string{"../gates"},
-		},
-		{
-			name: "path dep alongside other keys",
-			manifest: `[dependencies]` + "\n" +
-				`vutils = { path = "../vutils", version = "0.1.0" }`,
-			want: []string{"../vutils"},
-		},
-		{
-			name: "multiple path deps",
-			manifest: `[dependencies]` + "\n" +
-				`gates = { path = "../gates" }` + "\n" +
-				`primitives = { path = "../primitives" }`,
-			want: []string{"../gates", "../primitives"},
-		},
-		{
-			name: "version-only dep is ignored",
-			manifest: `[dependencies]` + "\n" +
-				`foo = "1.2.3"`,
-			want: nil,
+			Fileset:      "VHDL",
+			Library:      "gates",
+			Filepath:     "/tmp/gates/or_gate.vhd",
+			Dependencies: []string{},
 		},
 	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			matches := pathDepRegex.FindAllStringSubmatch(tc.manifest, -1)
-			var got []string
-			for _, m := range matches {
-				got = append(got, m[1])
-			}
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("pathDepRegex on %q: got %v, want %v", tc.manifest, got, tc.want)
-			}
-		})
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("blueprint parse mismatch\n got: %#v\nwant: %#v", got, want)
 	}
 }

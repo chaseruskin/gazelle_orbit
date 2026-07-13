@@ -19,7 +19,7 @@ verilog_library(
 
 verilog_library(
     name = "reg_n",
-    srcs = ["reg.v"],
+    srcs = ["reg_n.v"],
     library = "vutils",
     tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],

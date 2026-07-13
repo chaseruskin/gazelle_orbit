@@ -1,7 +1,6 @@
 package orbit
 
 import (
-	"fmt"
 	"log"
 	"os"
 	"path/filepath"
@@ -12,220 +11,126 @@ import (
 	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
-// vhdlExts and verilogExts list the source extensions we accept per language.
-var (
-	vhdlExts          = map[string]bool{".vhd": true, ".vhdl": true}
-	verilogExts       = map[string]bool{".v": true, ".vh": true}
-	systemVerilogExts = map[string]bool{".sv": true, ".svh": true}
-)
-
-// ruleBucket groups all design units that share the same source file set
-// (e.g. a VHDL entity + its architecture) into a single Bazel rule.
-//
-// Each bucket's `kind` is decided up front from the srcs' file extensions:
-//   - all `.vhd` / `.vhdl` → `vhdl_library`
-//   - all `.v` / `.sv` → `verilog_library`
-//   - mixed extensions in one srcs bucket → error (should not happen in
-//     practice; each design unit's sources are always single-language and
-//     buckets are keyed by srcs, so a mixed bucket would imply two units
-//     with different-language srcs sharing an identical srcs list — a
-//     contradiction). Cross-language DEPENDENCIES between rules are the
-//     interesting case and are handled in Resolve() by routing to the
-//     dedicated `verilog_deps` / `vhdl_deps` attrs.
-type ruleBucket struct {
-	ruleName string
-	kind     string
-	library  string
-	srcs     []string
-	units    []UnitInfo
+// filesetKind maps orbit's fileset classification to the Bazel rule kind
+// that should own a file of that fileset. Unrecognized filesets (custom
+// project-defined ones) return "" and their entries are skipped.
+func filesetKind(fileset string) string {
+	switch fileset {
+	case "VHDL":
+		return kindVhdlLibrary
+	case "VLOG", "SYSV":
+		return kindVerilogLibrary
+	default:
+		return ""
+	}
 }
 
 // GenerateRules implements language.Language.
 //
-// Strategy: for any directory we decide to "own" (per shouldGenerateAtThisDir),
-// invoke `orbit analyze --json` and translate the reported design units into
-// vhdl_library / verilog_library rules — one per primary design unit, with
-// srcs limited to files whose nearest ancestor BUILD is this BUILD (i.e.,
-// files directly in this dir, or in subdirectories that don't have their
-// own BUILD between them and us).
+// Strategy: for any directory we decide to "own" (per the placement
+// rules below), invoke `orbit analyze --plan json --local --force` and
+// translate the blueprint into vhdl_library / verilog_library rules —
+// one per HDL source file, named after the file's basename (with any
+// subdirectory prefix preserved and the extension stripped).
 //
-// Cross-package references (units defined in other directories) are left as
-// raw import specs and resolved later in Resolve().
+// Placement rule (the "nearest existing ancestor BUILD" rule): gazelle
+// never invents a new sub-BUILD inside a subtree where an ancestor
+// BUILD already owns the source files. This keeps `glob(["<subdir>/**"])`-
+// style targets in the ancestor BUILD intact (no fragmenting of
+// subtrees), which matters for vendor IP repos that ship as
+// `vivado_packaged_ip(srcs = glob([...]))` and need a recursive glob to
+// stay un-truncated.
 //
-// Placement rule (the "nearest existing ancestor BUILD" rule): gazelle never
-// invents a new sub-BUILD inside a subtree where an ancestor BUILD already
-// owns the source files. This keeps `glob(["<subdir>/**"])`-style targets in
-// the ancestor BUILD intact (no fragmenting of subtrees), which matters for
-// vendor IP repos that ship as `vivado_packaged_ip(srcs = glob([...]))` and
-// need a recursive glob to stay un-truncated.
+// Cross-package dependencies (blueprint entries whose absolute filepath
+// resolves to a file in another Bazel package) are left as raw filepath
+// import specs and resolved to labels in Resolve().
 func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
 	cfg := getConfig(args.Config)
 	if cfg.disabled {
 		return language.GenerateResult{}
 	}
 
-	// One BUILD-presence cache shared across the three walkers below, so
+	// One BUILD-presence cache shared across the placement walkers, so
 	// every `hasBuildFile` lookup happens at most once per unique dir per
-	// GenerateRules invocation. Re-created per call because Gazelle's
-	// language interface is stateless and the same ancestor chain is
-	// walked many times for a project with lots of HDL files in
-	// `subdir/`-style layouts.
+	// GenerateRules invocation.
 	cache := buildFileCache{}
 
 	// Placement gate. If this dir has no BUILD of its own AND some ancestor
 	// already does, defer to the ancestor — its GenerateRules call collects
-	// our HDL via the subtree walk below. Skipping here means the framework
-	// won't write a new BUILD into this subdir.
+	// our HDL via the subtree walk below.
 	if args.File == nil && anyAncestorHasBuild(args.Dir, args.Config.RepoRoot, cache) {
 		return language.GenerateResult{}
 	}
 
 	// HDL discovery has to be subtree-aware: this dir may own HDL files in
-	// descendant directories that don't have their own BUILDs (the
-	// vendor-IP case — `ip/BUILD.bazel` owns HDL nested several levels deep
-	// under `managed_ethernet_switch/hdl/mes_hdl/...`). `args.RegularFiles`
-	// only contains files in this directory, so we walk the subtree
-	// ourselves, stopping at any descendant BUILD (those subtrees are
-	// owned by their own GenerateRules calls).
+	// descendant directories that don't have their own BUILDs.
 	if !hasOwnedHDLInSubtree(args.Dir, cache) {
 		return language.GenerateResult{}
 	}
 
-	parsed, err := runOrbitAnalyze(cfg.orbitBin, args.Dir)
+	entries, err := runOrbitAnalyze(cfg.orbitBin, args.Dir)
 	if err != nil {
 		log.Printf("gazelle_orbit: skipping %s: %v", args.Rel, err)
 		return language.GenerateResult{}
 	}
 
-	// Group units that share the same source file set into one rule so we
-	// don't generate two targets with identical srcs (e.g. a VHDL entity
-	// and its architecture). Key on a canonical sorted srcs list.
-	buckets := map[string]*ruleBucket{}
-	bucketOrder := []string{}
-
-	for _, u := range parsed.Units {
-		if cfg.ignoreUnits[u.Name] {
-			continue
-		}
-		localSrcs := filesUnderBuildOwnership(u.Sources, args.Dir, cache)
-		if len(localSrcs) == 0 {
-			continue
-		}
-		if !hasSupportedLanguage(u.Language) {
-			continue
-		}
-		library := u.Library
-		if cfg.libraryName != "" {
-			library = cfg.libraryName
-		}
-		// Bucket by (library, srcs) only — kind is derived from srcs
-		// extensions after bucketing. Mixed-language srcs in a single
-		// bucket is a hard error (see `kindFromSrcs`) — each design unit's
-		// sources are always single-language in practice, so a mixed
-		// bucket only arises from a corrupt/unexpected orbit report.
-		key := library + "|" + strings.Join(localSrcs, ",")
-		b, ok := buckets[key]
-		if !ok {
-			b = &ruleBucket{
-				ruleName: ruleNameFor(u),
-				library:  library,
-				srcs:     localSrcs,
-			}
-			buckets[key] = b
-			bucketOrder = append(bucketOrder, key)
-		}
-		b.units = append(b.units, u)
-	}
+	// Sort entries by filepath so generated rule order is deterministic
+	// regardless of orbit's internal ordering.
+	sort.SliceStable(entries, func(i, j int) bool {
+		return entries[i].Filepath < entries[j].Filepath
+	})
 
 	result := language.GenerateResult{}
-	for _, k := range bucketOrder {
-		b := buckets[k]
-		kind, err := kindFromSrcs(b.srcs)
-		if err != nil {
-			log.Printf("gazelle_orbit: %s/%s: %v", args.Rel, b.ruleName, err)
+	for _, entry := range entries {
+		kind := filesetKind(entry.Fileset)
+		if kind == "" {
+			// Custom / unrecognized fileset — nothing we can express as a
+			// vhdl_library / verilog_library rule.
 			continue
 		}
-		b.kind = kind
-		r := rule.NewRule(b.kind, b.ruleName)
-		r.SetAttr("srcs", b.srcs)
+		relSrc, ok := fileUnderBuildOwnership(entry.Filepath, args.Dir, cache)
+		if !ok {
+			continue
+		}
+		name := ruleNameFromSrc(relSrc)
+		r := rule.NewRule(kind, name)
+		r.SetAttr("srcs", []string{relSrc})
+		r.SetAttr("library", entry.Library)
 		// HDL libraries are almost always consumed across packages
-		// (cpu/dsp depending on primitives, vutils, gates, etc.) so we
+		// (cpu/dsp depending on primitives, vutils, etc.) so we
 		// default-emit public visibility. If a user wants narrower
 		// scoping they can edit the BUILD file and Gazelle will leave
 		// their override in place.
 		r.SetAttr("visibility", []string{"//visibility:public"})
 		// Every plugin-generated rule carries the `gazelle_orbit` tag so
-		// users can tell at a glance which targets are auto-managed (and
-		// query/filter on them, e.g. `bazel query 'attr(tags,
+		// users can tell at a glance which targets are auto-managed
+		// (and query/filter on them, e.g. `bazel query 'attr(tags,
 		// "\bgazelle_orbit\b", //...)'`). User-added tags survive
 		// because we union-merge with what's already on the rule.
-		r.SetAttr("tags", mergeOrbitTag(existingTagsForRule(args.File, b.ruleName)))
-		// Both `vhdl_library` and `verilog_library` (rules_verilog v1.3.0+)
-		// have a public `library` attr. Set it uniformly on every rule so
-		// consumers that read the library name off the rule find it in the
-		// same place regardless of language.
-		r.SetAttr("library", b.library)
-		// Stash the list of design-unit names this rule provides so
-		// Imports() can index each one independently. Gazelle preserves
-		// private attrs but never writes them to the BUILD file.
-		r.SetPrivateAttr(unitNamesAttr, unitNamesIn(b))
+		r.SetAttr("tags", mergeOrbitTag(existingTagsForRule(args.File, name)))
 		result.Gen = append(result.Gen, r)
-		// Build the import-spec slice that Resolve() will receive.
-		result.Imports = append(result.Imports, importsForBucket(b))
+		// Blueprint dependencies are absolute filepaths — pass them
+		// through to Resolve() which maps each to the workspace label
+		// whose srcs contain that file.
+		result.Imports = append(result.Imports, ruleImports{
+			deps: append([]string(nil), entry.Dependencies...),
+		})
 	}
 
 	return result
 }
 
-// kindFromSrcs decides the rule kind for a bucket from the file extensions
-// in its srcs. Returns an error for mixed-language buckets (see the note on
-// `ruleBucket`) — the caller should log-and-skip so a corrupt orbit report
-// doesn't derail the whole gazelle run.
-func kindFromSrcs(srcs []string) (string, error) {
-	hasVhdl := false
-	hasVerilog := false
-	for _, s := range srcs {
-		ext := strings.ToLower(filepath.Ext(s))
-		if vhdlExts[ext] {
-			hasVhdl = true
-		} else if verilogExts[ext] || systemVerilogExts[ext] {
-			hasVerilog = true
-		}
-	}
-	switch {
-	case hasVhdl && hasVerilog:
-		return "", fmt.Errorf(
-			"srcs mix VHDL and Verilog/SV in a single design-unit bucket (%v); "+
-				"expected each unit's sources to be single-language. Cross-language "+
-				"deps between separate rules are handled by verilog_deps / vhdl_deps "+
-				"at Resolve time — split the unit into per-language srcs or file an "+
-				"issue if this came from a legitimate orbit report",
-			srcs,
-		)
-	case hasVhdl:
-		return kindVhdlLibrary, nil
-	case hasVerilog:
-		return kindVerilogLibrary, nil
-	default:
-		return "", fmt.Errorf("no recognized HDL srcs in bucket %v", srcs)
-	}
+// ruleImports is the per-rule data GenerateRules attaches for Resolve()
+// to consume. `deps` holds the blueprint's absolute-path dependency list
+// verbatim; the consumer's own language is derived from the rule's kind
+// (kindVhdlLibrary vs kindVerilogLibrary) at resolve time.
+type ruleImports struct {
+	deps []string
 }
 
-// hasSupportedLanguage reports whether orbit's reported language string is
-// one we can map to a Bazel rule.
-func hasSupportedLanguage(lang string) bool {
-	switch strings.ToLower(lang) {
-	case "vhdl", "verilog", "systemverilog":
-		return true
-	default:
-		return false
-	}
-}
-
-// orbitTag is the bare tag value attached to every plugin-generated rule.
-// Distinct from the prefixed tags (`orbit_library=…`, `orbit_unit=…`) that
-// are read off hand-authored rules — this one is purely a "produced by
-// gazelle_orbit" marker.
+// orbitTag is the bare tag value attached to every plugin-generated rule
+// — purely a "produced by gazelle_orbit" marker so users can query/filter
+// on it.
 const orbitTag = "gazelle_orbit"
 
 // existingTagsForRule reads any prior tags off a rule that already exists
@@ -238,8 +143,6 @@ func existingTagsForRule(f *rule.File, name string) []string {
 }
 
 // mergeOrbitTag returns existing ∪ {orbitTag}, deduplicated and sorted.
-// Used to ensure the marker is always present on plugin-generated rules
-// without clobbering user-added tags on re-runs.
 func mergeOrbitTag(existing []string) []string {
 	seen := map[string]bool{orbitTag: true}
 	out := []string{orbitTag}
@@ -253,25 +156,6 @@ func mergeOrbitTag(existing []string) []string {
 	sort.Strings(out)
 	return out
 }
-
-// unitNamesIn returns the sanitized names of every design unit in b.
-func unitNamesIn(b *ruleBucket) []string {
-	out := make([]string, 0, len(b.units))
-	seen := map[string]bool{}
-	for _, u := range b.units {
-		n := sanitizeName(u.Name)
-		if seen[n] {
-			continue
-		}
-		seen[n] = true
-		out = append(out, n)
-	}
-	return out
-}
-
-// unitNamesAttr is the private attribute key used to stash the bucket's
-// design-unit names on each generated rule.
-const unitNamesAttr = "_orbit_unit_names"
 
 // findExistingRuleByName returns the existing rule of the given name in
 // the BUILD file, or nil if none exists.
@@ -287,122 +171,51 @@ func findExistingRuleByName(f *rule.File, name string) *rule.Rule {
 	return nil
 }
 
-// importsForBucket flattens all refs from all units in a bucket into a single
-// dedup'd slice, exclusive of self-imports (refs pointing to a unit defined
-// in the same bucket).
-func importsForBucket(b *ruleBucket) []ruleImport {
-	selfUnits := map[string]bool{}
-	for _, u := range b.units {
-		selfUnits[sanitizeName(u.Name)] = true
-	}
-	seen := map[string]bool{}
-	out := []ruleImport{}
-	for _, u := range b.units {
-		for _, r := range u.Refs {
-			lib := ""
-			if r.Library != nil {
-				lib = *r.Library
-			}
-			name := sanitizeName(r.Name)
-			key := strings.ToLower(lib) + "." + name
-			if seen[key] {
-				continue
-			}
-			// Skip self-references and refs to units defined in the
-			// same bucket.
-			if selfUnits[name] {
-				continue
-			}
-			seen[key] = true
-			out = append(out, ruleImport{Library: lib, Name: name, OriginLib: b.library})
-		}
-	}
-	sort.Slice(out, func(i, j int) bool {
-		if out[i].Library != out[j].Library {
-			return out[i].Library < out[j].Library
-		}
-		return out[i].Name < out[j].Name
-	})
-	return out
+// ruleNameFromSrc derives the Bazel target name for a rule from its
+// single srcs entry. Extension stripped, subdirectory prefix preserved
+// (so `subdir/foo.vhd` → `subdir/foo`, unique across sibling subdirs by
+// construction and legal as a Bazel target name).
+func ruleNameFromSrc(src string) string {
+	return strings.TrimSuffix(src, filepath.Ext(src))
 }
 
-// pickHDLFiles returns the subset of files in regularFiles that have an HDL
-// extension.
-func pickHDLFiles(regularFiles []string) []string {
-	var out []string
-	for _, f := range regularFiles {
-		ext := strings.ToLower(filepath.Ext(f))
-		if vhdlExts[ext] || verilogExts[ext] || systemVerilogExts[ext] {
-			out = append(out, f)
-		}
-	}
-	return out
-}
-
-// filesUnderBuildOwnership returns the subset of absolute paths in srcs
-// that belong to the BUILD at buildDir per the nearest-existing-ancestor-
-// BUILD rule, with paths rewritten relative to buildDir so they're valid
-// Bazel srcs entries.
+// fileUnderBuildOwnership reports whether the absolute path `absFile`
+// belongs to the BUILD at `buildDir` under the nearest-existing-
+// ancestor-BUILD rule. If so, it returns the file's path relative to
+// buildDir (always using forward slashes, valid as a Bazel srcs entry).
 //
-// A file belongs to buildDir iff every directory between the file's parent
-// and buildDir (inclusive of intermediate dirs, exclusive of buildDir) has
-// NO `BUILD.bazel` / `BUILD`. The first intervening BUILD encountered while
-// walking up from the file owns it instead.
-//
-// For files that are direct children of buildDir, the rewritten path is
-// just the basename (no slashes). For files in subdirectories, it's the
-// sub-path relative to buildDir (e.g. `subdir/foo.vhd`).
-func filesUnderBuildOwnership(srcs []string, buildDir string, cache buildFileCache) []string {
+// A file belongs to buildDir iff every directory strictly between the
+// file's parent and buildDir has NO `BUILD.bazel` / `BUILD` — the first
+// intervening BUILD encountered while walking up owns the file instead.
+func fileUnderBuildOwnership(absFile, buildDir string, cache buildFileCache) (string, bool) {
 	absDir, err := filepath.Abs(buildDir)
 	if err != nil {
-		return nil
+		return "", false
 	}
-	var out []string
-	for _, s := range srcs {
-		absS, err := filepath.Abs(s)
-		if err != nil {
-			continue
-		}
-		if !fileBelongsToBuild(absS, absDir, cache) {
-			continue
-		}
-		rel, err := filepath.Rel(absDir, absS)
-		if err != nil {
-			continue
-		}
-		out = append(out, filepath.ToSlash(rel))
+	absF, err := filepath.Abs(absFile)
+	if err != nil {
+		return "", false
 	}
-	sort.Strings(out)
-	return out
-}
-
-// fileBelongsToBuild reports whether absFile (absolute path) should be
-// owned by the BUILD at buildDirAbs (also absolute) per the nearest-
-// existing-ancestor-BUILD rule. Returns false if the file is outside
-// buildDirAbs's subtree OR if any directory strictly between the file's
-// parent and buildDirAbs (exclusive of buildDirAbs) holds its own
-// BUILD.bazel / BUILD.
-func fileBelongsToBuild(absFile, buildDirAbs string, cache buildFileCache) bool {
-	dir := filepath.Dir(absFile)
-	// Must be a descendant (or same dir).
-	rel, err := filepath.Rel(buildDirAbs, dir)
+	dir := filepath.Dir(absF)
+	rel, err := filepath.Rel(absDir, dir)
 	if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false
+		return "", false
 	}
-	for dir != buildDirAbs {
+	for dir != absDir {
 		if cache.has(dir) {
-			return false
+			return "", false
 		}
 		parent := filepath.Dir(dir)
 		if parent == dir {
-			// Reached filesystem root without hitting buildDirAbs — file
-			// wasn't actually under buildDirAbs (defensive; the
-			// filepath.Rel check above should have caught it).
-			return false
+			return "", false
 		}
 		dir = parent
 	}
-	return true
+	relPath, err := filepath.Rel(absDir, absF)
+	if err != nil {
+		return "", false
+	}
+	return filepath.ToSlash(relPath), true
 }
 
 // anyAncestorHasBuild reports whether any directory strictly between
@@ -436,8 +249,8 @@ func anyAncestorHasBuild(startDir, repoRoot string, cache buildFileCache) bool {
 
 // buildFileCache memoises hasBuildFile lookups within a single
 // GenerateRules call. The three walkers (anyAncestorHasBuild upward,
-// fileBelongsToBuild upward-bounded, hasOwnedHDLInSubtree downward) all
-// stat the same ancestor chains repeatedly when a project has many
+// fileUnderBuildOwnership upward-bounded, hasOwnedHDLInSubtree downward)
+// all stat the same ancestor chains repeatedly when a project has many
 // HDL files under one BUILD — the cache turns N walks × M ancestors
 // of redundant `os.Stat` calls into one stat per unique dir per call.
 type buildFileCache map[string]bool
@@ -480,15 +293,13 @@ func hasOwnedHDLInSubtree(buildDir string, cache buildFileCache) bool {
 			return filepath.SkipDir
 		}
 		if d.IsDir() {
-			// Don't descend into a directory that has its own BUILD —
-			// it's a separate package owned by its own GenerateRules.
 			if path != buildDir && cache.has(path) {
 				return filepath.SkipDir
 			}
 			return nil
 		}
 		ext := strings.ToLower(filepath.Ext(d.Name()))
-		if vhdlExts[ext] || verilogExts[ext] || systemVerilogExts[ext] {
+		if hdlExts[ext] {
 			found = true
 			return filepath.SkipAll
 		}
@@ -497,17 +308,17 @@ func hasOwnedHDLInSubtree(buildDir string, cache buildFileCache) bool {
 	return found
 }
 
-// ruleNameFor derives the Bazel target name for a unit. We lowercase and
-// strip the VHDL extended-identifier wrapping (`\name `) so the result is a
-// legal Bazel label.
-func ruleNameFor(u UnitInfo) string {
-	return sanitizeName(u.Name)
+// hdlExts lists every source extension the plugin classifies as HDL.
+// Kept in one place because both the subtree-walk shortcut in
+// hasOwnedHDLInSubtree and (should we ever need it again) source
+// filtering elsewhere key off the same set. Matches orbit's built-in
+// fileset extensions for VHDL / VLOG / SYSV.
+var hdlExts = map[string]bool{
+	".vhd":  true,
+	".vhdl": true,
+	".v":    true,
+	".vh":   true,
+	".sv":   true,
+	".svh":  true,
 }
 
-func sanitizeName(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.TrimPrefix(s, `\`)
-	s = strings.TrimSuffix(s, `\`)
-	s = strings.TrimSpace(s)
-	return strings.ToLower(s)
-}

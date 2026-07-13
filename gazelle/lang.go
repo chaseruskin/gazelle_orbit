@@ -20,20 +20,6 @@ const (
 	kindVerilogLibrary = "verilog_library"
 )
 
-// codegenLibraryKinds lists additional rule kinds we recognize as
-// VerilogInfo / VhdlInfo providers for indexing purposes only — we never
-// generate or merge these. Users authoring rules of these kinds can attach
-// `tags = ["orbit_library=...", "orbit_unit=..."]` to participate in
-// gazelle_orbit's workspace-wide dependency resolution without an extra
-// vhdl_library / verilog_library wrapper.
-//
-// Each entry is treated as a read-only library kind: Imports() runs on it
-// (so the rule shows up in the index), but GenerateRules() never produces
-// one and merge never touches one.
-var codegenLibraryKinds = []string{
-	"verilog_system_rdl_library",
-}
-
 // orbitLang implements language.Language.
 type orbitLang struct{}
 
@@ -88,24 +74,10 @@ var generatedKindInfo = rule.KindInfo{
 
 // Kinds implements language.Language.
 func (*orbitLang) Kinds() map[string]rule.KindInfo {
-	kinds := map[string]rule.KindInfo{
+	return map[string]rule.KindInfo{
 		kindVhdlLibrary:    generatedKindInfo,
 		kindVerilogLibrary: generatedKindInfo,
 	}
-	// Read-only kinds: Gazelle will call Imports() on rules of these kinds
-	// (letting the workspace-wide index see them) but the plugin won't
-	// generate or merge anything for them.
-	for _, k := range codegenLibraryKinds {
-		kinds[k] = rule.KindInfo{
-			MatchAny:        false,
-			MatchAttrs:      nil,
-			NonEmptyAttrs:   nil,
-			SubstituteAttrs: nil,
-			MergeableAttrs:  nil,
-			ResolveAttrs:    nil,
-		}
-	}
-	return kinds
 }
 
 // Loads implements language.Language. It's deprecated in favor of

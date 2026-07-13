@@ -10,42 +10,27 @@ import (
 )
 
 // orbitConfig is the per-directory configuration state for the plugin.
-// Created fresh at the root and inherited (then mutated) for each subdirectory
-// via Configure(). The state lives in config.Config.Exts under languageName.
+// Created fresh at the root and inherited (then mutated) for each
+// subdirectory via Configure(). The state lives in config.Config.Exts
+// under languageName.
 type orbitConfig struct {
 	// orbitBin is the path to the orbit executable. May be empty, in which
 	// case "orbit" is looked up on $PATH.
 	orbitBin string
-
-	// libraryName overrides the HDL library name reported by orbit for any
-	// units found in this directory. Empty means "use what orbit reports".
-	libraryName string
-
-	// ignoreUnits is the set of design-unit names to skip when generating
-	// rules in this directory.
-	ignoreUnits map[string]bool
 
 	// disabled disables rule generation entirely for this directory subtree.
 	disabled bool
 }
 
 func defaultConfig() *orbitConfig {
-	return &orbitConfig{
-		ignoreUnits: map[string]bool{},
-	}
+	return &orbitConfig{}
 }
 
 func (c *orbitConfig) clone() *orbitConfig {
-	cp := &orbitConfig{
-		orbitBin:    c.orbitBin,
-		libraryName: c.libraryName,
-		disabled:    c.disabled,
-		ignoreUnits: make(map[string]bool, len(c.ignoreUnits)),
+	return &orbitConfig{
+		orbitBin: c.orbitBin,
+		disabled: c.disabled,
 	}
-	for k := range c.ignoreUnits {
-		cp.ignoreUnits[k] = true
-	}
-	return cp
 }
 
 // getConfig returns the orbit config for c, creating a default if absent.
@@ -81,21 +66,19 @@ func (*orbitLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 // KnownDirectives implements config.Configurer.
 //
 // Note: Gazelle's built-in `# gazelle:resolve orbit <import> <label>`
-// directive is the canonical way to map a unit reference to a Bazel label
-// (vendor IP, external stdlibs, codegen wrappers). The resolver consults it
-// in resolve.go via resolve.FindRuleWithOverride, so we don't declare it
-// here.
+// directive is the canonical way to override how a specific dep resolves
+// (imports are workspace-relative filepaths under the blueprint backing).
+// The resolver consults it in resolve.go via resolve.FindRuleWithOverride,
+// so we don't declare it here.
 func (*orbitLang) KnownDirectives() []string {
 	return []string{
 		"orbit_disable",
-		"orbit_library",
-		"orbit_ignore",
 	}
 }
 
-// Configure implements config.Configurer. It is called for each directory
-// during traversal; we inherit (clone) the parent's config then apply any
-// directives found in this directory's BUILD file.
+// Configure implements config.Configurer. It is called for each
+// directory during traversal; we inherit (clone) the parent's config
+// then apply any directives found in this directory's BUILD file.
 func (*orbitLang) Configure(c *config.Config, rel string, f *rule.File) {
 	parent := getConfig(c)
 	cfg := parent.clone()
@@ -108,12 +91,6 @@ func (*orbitLang) Configure(c *config.Config, rel string, f *rule.File) {
 		switch d.Key {
 		case "orbit_disable":
 			cfg.disabled = strings.EqualFold(strings.TrimSpace(d.Value), "true")
-		case "orbit_library":
-			cfg.libraryName = strings.TrimSpace(d.Value)
-		case "orbit_ignore":
-			for _, name := range strings.Fields(d.Value) {
-				cfg.ignoreUnits[name] = true
-			}
 		}
 	}
 }

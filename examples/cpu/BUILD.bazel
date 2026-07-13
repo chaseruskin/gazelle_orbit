@@ -21,3 +21,18 @@ verilog_library(
         "//vutils:mux2",
     ],
 )
+
+verilog_library(
+    name = "timer",
+    srcs = ["timer.sv"],
+    library = "cpu",
+    tags = ["gazelle_orbit"],
+    visibility = ["//visibility:public"],
+    deps = [
+        # Orbit can't see the build-time-generated params.svh (the
+        # `write_file` output that timer.sv `` `include``s), so gazelle
+        # can't compute this dep from source. `# keep` on the line
+        # tells Gazelle's merger to preserve the entry across regens.
+        "//preproc:params",  # keep
+    ],
+)

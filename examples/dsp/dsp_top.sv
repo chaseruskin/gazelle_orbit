@@ -24,11 +24,11 @@ module dsp_top (
 
   // Generated register block from //uart_regs:uart_regs.
   //
-  // Two distinct references to the same wrapper rule:
-  //   1. `import uart_regs_pkg::*;` — resolved via the rule's
-  //      `tags = ["orbit_unit=uart_regs_pkg"]` index entry.
-  //   2. `uart_regs u_regs (...)` — resolved via the rule's `name`.
-  // Both collapse to a single `//uart_regs:uart_regs` dep.
+  // Both `import uart_regs_pkg::*;` above and `uart_regs u_regs (...)`
+  // below refer to the PeakRDL-generated .sv files. Orbit runs before
+  // Bazel builds anything, so it never sees those files — the deps
+  // don't appear in the blueprint. `dsp/BUILD.bazel` pins the dep on
+  // this rule with `# keep` on the dep line.
   uart_regs u_regs (
     .clk(clk), .rst_n(rst_n),
     .wr_en(reg_wr_en), .wr_data(reg_wr_data),
