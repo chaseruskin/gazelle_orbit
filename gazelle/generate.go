@@ -80,7 +80,15 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		return entries[i].Filepath < entries[j].Filepath
 	})
 
-	result := language.GenerateResult{}
+	// First pass: collect owned entries so we can compute rule names in a
+	// single batch. Name-assignment needs to see every rule at once to
+	// detect basename collisions (see assignRuleNames).
+	type ownedEntry struct {
+		entry  BlueprintEntry
+		kind   string
+		relSrc string
+	}
+	var owned []ownedEntry
 	for _, entry := range entries {
 		kind := filesetKind(entry.Fileset)
 		if kind == "" {
@@ -92,9 +100,20 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		if !ok {
 			continue
 		}
-		name := ruleNameFromSrc(relSrc)
-		r := rule.NewRule(kind, name)
-		r.SetAttr("srcs", []string{relSrc})
+		owned = append(owned, ownedEntry{entry: entry, kind: kind, relSrc: relSrc})
+	}
+
+	relSrcs := make([]string, 0, len(owned))
+	for _, o := range owned {
+		relSrcs = append(relSrcs, o.relSrc)
+	}
+	names := assignRuleNames(relSrcs)
+
+	result := language.GenerateResult{}
+	for i, o := range owned {
+		entry := o.entry
+		r := rule.NewRule(o.kind, names[i])
+		r.SetAttr("srcs", []string{o.relSrc})
 		r.SetAttr("library", entry.Library)
 		// HDL libraries are almost always consumed across packages
 		// (cpu/dsp depending on primitives, vutils, etc.) so we
@@ -107,7 +126,7 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		// (and query/filter on them, e.g. `bazel query 'attr(tags,
 		// "\bgazelle_orbit\b", //...)'`). User-added tags survive
 		// because we union-merge with what's already on the rule.
-		r.SetAttr("tags", mergeOrbitTag(existingTagsForRule(args.File, name)))
+		r.SetAttr("tags", mergeOrbitTag(existingTagsForRule(args.File, names[i]), cfg.extraTags))
 		result.Gen = append(result.Gen, r)
 		// Blueprint dependencies are absolute filepaths — pass them
 		// through to Resolve() which maps each to the workspace label
@@ -142,10 +161,23 @@ func existingTagsForRule(f *rule.File, name string) []string {
 	return nil
 }
 
-// mergeOrbitTag returns existing ∪ {orbitTag}, deduplicated and sorted.
-func mergeOrbitTag(existing []string) []string {
+// mergeOrbitTag returns existing ∪ extra ∪ {orbitTag}, deduplicated and
+// sorted. `extra` typically comes from the `# gazelle:orbit_tags a,b,c`
+// directive resolved for this dir. Both `existing` (user-added or from a
+// prior gazelle run) and `extra` (directive-declared) are additive —
+// removing the directive won't retroactively strip tags a prior run
+// wrote; that matches the existing "user tags survive" contract and
+// keeps merging simple.
+func mergeOrbitTag(existing, extra []string) []string {
 	seen := map[string]bool{orbitTag: true}
 	out := []string{orbitTag}
+	for _, t := range extra {
+		if t == "" || seen[t] {
+			continue
+		}
+		seen[t] = true
+		out = append(out, t)
+	}
 	for _, t := range existing {
 		if seen[t] {
 			continue
@@ -171,12 +203,36 @@ func findExistingRuleByName(f *rule.File, name string) *rule.Rule {
 	return nil
 }
 
-// ruleNameFromSrc derives the Bazel target name for a rule from its
-// single srcs entry. Extension stripped, subdirectory prefix preserved
-// (so `subdir/foo.vhd` → `subdir/foo`, unique across sibling subdirs by
-// construction and legal as a Bazel target name).
-func ruleNameFromSrc(src string) string {
-	return strings.TrimSuffix(src, filepath.Ext(src))
+// stripExt drops the extension from a path, leaving the directory
+// prefix (if any) intact: `subdir/foo.vhd` → `subdir/foo`, `foo.vhd`
+// → `foo`.
+func stripExt(s string) string {
+	return strings.TrimSuffix(s, filepath.Ext(s))
+}
+
+// assignRuleNames picks a Bazel target name for each srcs-relative path,
+// returned in the same order as `relSrcs`.
+//
+// Default is the source basename without extension, so `subdir/foo.vhd`
+// becomes just `foo`. When two or more sources in the batch would
+// collapse to the same bare name, the affected entries fall back to
+// their path-preserving form (`subdir/foo`) so each remains unique.
+// Non-conflicting entries in the same batch are unaffected.
+func assignRuleNames(relSrcs []string) []string {
+	counts := map[string]int{}
+	for _, rs := range relSrcs {
+		counts[stripExt(filepath.Base(rs))]++
+	}
+	out := make([]string, len(relSrcs))
+	for i, rs := range relSrcs {
+		bare := stripExt(filepath.Base(rs))
+		if counts[bare] > 1 {
+			out[i] = stripExt(rs)
+		} else {
+			out[i] = bare
+		}
+	}
+	return out
 }
 
 // fileUnderBuildOwnership reports whether the absolute path `absFile`

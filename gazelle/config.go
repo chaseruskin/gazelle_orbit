@@ -20,6 +20,11 @@ type orbitConfig struct {
 
 	// disabled disables rule generation entirely for this directory subtree.
 	disabled bool
+
+	// extraTags is the list of tags applied to every rule generated in
+	// this directory (and inherited subtrees, until overridden). Populated
+	// by the `# gazelle:orbit_tags a,b,c` directive; empty by default.
+	extraTags []string
 }
 
 func defaultConfig() *orbitConfig {
@@ -28,8 +33,9 @@ func defaultConfig() *orbitConfig {
 
 func (c *orbitConfig) clone() *orbitConfig {
 	return &orbitConfig{
-		orbitBin: c.orbitBin,
-		disabled: c.disabled,
+		orbitBin:  c.orbitBin,
+		disabled:  c.disabled,
+		extraTags: append([]string(nil), c.extraTags...),
 	}
 }
 
@@ -63,7 +69,16 @@ func (*orbitLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 	return nil
 }
 
-// KnownDirectives implements config.Configurer.
+// KnownDirectives implements config.Configurer. Plugin directives:
+//
+//   - `# gazelle:orbit_disable true` — skip rule generation in this
+//     subtree.
+//   - `# gazelle:orbit_tags <comma-separated>` — apply extra tags to
+//     every rule the plugin generates in this dir and its descendants.
+//     Comma-separated, whitespace-trimmed; empty value clears any
+//     inherited list. The `gazelle_orbit` marker tag is always emitted
+//     regardless. Tags are additive: removing the directive later won't
+//     retroactively strip tags a prior run committed.
 //
 // Note: Gazelle's built-in `# gazelle:resolve orbit <import> <label>`
 // directive is the canonical way to override how a specific dep resolves
@@ -73,6 +88,7 @@ func (*orbitLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 func (*orbitLang) KnownDirectives() []string {
 	return []string{
 		"orbit_disable",
+		"orbit_tags",
 	}
 }
 
@@ -91,6 +107,26 @@ func (*orbitLang) Configure(c *config.Config, rel string, f *rule.File) {
 		switch d.Key {
 		case "orbit_disable":
 			cfg.disabled = strings.EqualFold(strings.TrimSpace(d.Value), "true")
+		case "orbit_tags":
+			// Each occurrence REPLACES the list for this dir + descendants
+			// (Gazelle convention). Comma-separated, whitespace-trimmed;
+			// an empty value clears any inherited tags for this subtree.
+			cfg.extraTags = parseTagList(d.Value)
 		}
 	}
+}
+
+// parseTagList splits a comma-separated directive value into trimmed,
+// non-empty tags. Returns nil for empty/whitespace-only input so downstream
+// callers can compare against nil to detect "no extra tags".
+func parseTagList(s string) []string {
+	var out []string
+	for _, part := range strings.Split(s, ",") {
+		t := strings.TrimSpace(part)
+		if t == "" {
+			continue
+		}
+		out = append(out, t)
+	}
+	return out
 }
