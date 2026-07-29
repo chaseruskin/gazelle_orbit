@@ -377,4 +377,3 @@ var hdlExts = map[string]bool{
 	".sv":   true,
 	".svh":  true,
 }
-
