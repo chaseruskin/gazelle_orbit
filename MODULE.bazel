@@ -28,7 +28,7 @@ http_archive(
     name = "orbit",
     build_file = "//3rdparty/orbit:BUILD.orbit.bazel",
     integrity = "sha256-jkt+jMOzpmcr6Ol2Wqyx4Y4zVTP21SqH6cwUfHL9S+A=",
-    strip_prefix = "orbit-0.29.3-source",
+    strip_prefix = "orbit-0.29.3",
     urls = ["https://github.com/chaseruskin/orbit/releases/download/0.29.3/orbit-0.29.3-source.tar.gz"],
 )
 
