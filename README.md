@@ -7,7 +7,7 @@ To generate and update your HDL rules:
 bazel run //:gazelle
 ```
 
-The above command walks the current workspace, runs `orbit analyze`, and writes per-package `BUILD.bazel` files whose `srcs` and `deps` lists reflect the entities, modules, packages, `use` clauses, and instantiations in your HDL. Cross-package and cross-library refrences resolve automatically through a workspace-wide index.
+The above command walks the current workspace, runs `orbit analyze`, and writes per-package `BUILD.bazel` files whose `srcs` and `deps` lists reflect the relationship between your HDL files. Cross-package and cross-library references resolve automatically through a workspace-wide index.
 
 ## Examples
 
