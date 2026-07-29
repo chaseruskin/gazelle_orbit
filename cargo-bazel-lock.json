@@ -1,5 +1,5 @@
 {
-  "checksum": "275b4cab3fc04a9f125e27a84d2284b977b6b543767ce8d3949af4359980d75c",
+  "checksum": "a69cf16b6765b7f9fdb490f61b1246d03a06b817f0795f06a1ebadb4d841ef75",
   "crates": {
     "adler2 2.0.1": {
       "name": "adler2",
@@ -12391,18 +12391,6 @@
               ]
             }
           }
-        },
-        {
-          "BuildScript": {
-            "crate_name": "build_script_build",
-            "crate_root": "build.rs",
-            "srcs": {
-              "allow_empty": true,
-              "include": [
-                "**/*.rs"
-              ]
-            }
-          }
         }
       ],
       "library_target_name": "zstd_sys",
@@ -12416,39 +12404,14 @@
           ],
           "selects": {}
         },
-        "extra_deps": {
-          "common": [
-            ":build_script_build"
-          ],
-          "selects": {}
-        },
         "edition": "2018",
-        "version": "2.0.16+zstd.1.5.7"
-      },
-      "build_script_attrs": {
-        "compile_data_glob": [
-          "**"
-        ],
-        "compile_data_glob_excludes": [
-          "**/*.rs"
-        ],
-        "data_glob": [
-          "**"
-        ],
-        "deps": {
+        "extra_link_deps": {
           "common": [
-            {
-              "id": "cc 1.2.66",
-              "target": "cc"
-            },
-            {
-              "id": "pkg-config 0.3.33",
-              "target": "pkg_config"
-            }
+            "@zstd//:zstd"
           ],
           "selects": {}
         },
-        "links": "zstd"
+        "version": "2.0.16+zstd.1.5.7"
       },
       "license": "MIT/Apache-2.0",
       "license_ids": [
