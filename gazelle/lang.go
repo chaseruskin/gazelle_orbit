@@ -57,12 +57,9 @@ var generatedKindInfo = rule.KindInfo{
 		"verilog_deps": true, // cross-language on vhdl_library
 		"vhdl_deps":    true, // cross-language on verilog_library
 		"library":      true,
-		// `tags` is mergeable so the gen-rule's value (which already
-		// includes a union of the existing tags + the `gazelle_orbit`
-		// marker — see mergeOrbitTag in generate.go) overwrites the on-
-		// disk value. The merge happens in GenerateRules rather than via
-		// Gazelle's attr-level union so we can guarantee the marker is
-		// always present without needing extra merger hooks.
+		// `tags` is mergeable so user-added tags on an already-generated
+		// rule survive across gazelle runs when the plugin sets tags from
+		// the `# gazelle:orbit_tags` directive.
 		"tags": true,
 	},
 	ResolveAttrs: map[string]bool{

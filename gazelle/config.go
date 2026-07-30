@@ -76,9 +76,8 @@ func (*orbitLang) CheckFlags(fs *flag.FlagSet, c *config.Config) error {
 //   - `# gazelle:orbit_tags <comma-separated>` — apply extra tags to
 //     every rule the plugin generates in this dir and its descendants.
 //     Comma-separated, whitespace-trimmed; empty value clears any
-//     inherited list. The `gazelle_orbit` marker tag is always emitted
-//     regardless. Tags are additive: removing the directive later won't
-//     retroactively strip tags a prior run committed.
+//     inherited list. Tags are additive: removing the directive later
+//     won't retroactively strip tags a prior run committed.
 //
 // Note: Gazelle's built-in `# gazelle:resolve orbit <import> <label>`
 // directive is the canonical way to override how a specific dep resolves

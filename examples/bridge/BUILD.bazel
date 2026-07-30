@@ -9,7 +9,6 @@ verilog_library(
     name = "and_wrapper",
     srcs = ["and_wrapper.sv"],
     library = "bridge",
-    tags = ["gazelle_orbit"],
     vhdl_deps = ["//primitives:and_gate"],
     visibility = ["//visibility:public"],
 )
