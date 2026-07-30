@@ -4,7 +4,6 @@ verilog_library(
     name = "dsp_top",
     srcs = ["dsp_top.sv"],
     library = "dsp",
-    tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = [
         # PeakRDL emits uart_regs.sv + uart_regs_pkg.sv at build time;
@@ -22,7 +21,6 @@ verilog_library(
     name = "multiplier",
     srcs = ["multiplier.v"],
     library = "dsp",
-    tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = ["//vutils:reg_n"],
 )

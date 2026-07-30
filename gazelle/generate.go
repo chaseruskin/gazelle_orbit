@@ -121,12 +121,9 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 		// scoping they can edit the BUILD file and Gazelle will leave
 		// their override in place.
 		r.SetAttr("visibility", []string{"//visibility:public"})
-		// Every plugin-generated rule carries the `gazelle_orbit` tag so
-		// users can tell at a glance which targets are auto-managed
-		// (and query/filter on them, e.g. `bazel query 'attr(tags,
-		// "\bgazelle_orbit\b", //...)'`). User-added tags survive
-		// because we union-merge with what's already on the rule.
-		r.SetAttr("tags", mergeOrbitTag(existingTagsForRule(args.File, names[i]), cfg.extraTags))
+		if len(cfg.extraTags) > 0 {
+			r.SetAttr("tags", append([]string(nil), cfg.extraTags...))
+		}
 		result.Gen = append(result.Gen, r)
 		// Blueprint dependencies are absolute filepaths — pass them
 		// through to Resolve() which maps each to the workspace label
@@ -145,62 +142,6 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 // (kindVhdlLibrary vs kindVerilogLibrary) at resolve time.
 type ruleImports struct {
 	deps []string
-}
-
-// orbitTag is the bare tag value attached to every plugin-generated rule
-// — purely a "produced by gazelle_orbit" marker so users can query/filter
-// on it.
-const orbitTag = "gazelle_orbit"
-
-// existingTagsForRule reads any prior tags off a rule that already exists
-// in the BUILD file under the given name. Returns nil when the rule is new.
-func existingTagsForRule(f *rule.File, name string) []string {
-	if r := findExistingRuleByName(f, name); r != nil {
-		return r.AttrStrings("tags")
-	}
-	return nil
-}
-
-// mergeOrbitTag returns existing ∪ extra ∪ {orbitTag}, deduplicated and
-// sorted. `extra` typically comes from the `# gazelle:orbit_tags a,b,c`
-// directive resolved for this dir. Both `existing` (user-added or from a
-// prior gazelle run) and `extra` (directive-declared) are additive —
-// removing the directive won't retroactively strip tags a prior run
-// wrote; that matches the existing "user tags survive" contract and
-// keeps merging simple.
-func mergeOrbitTag(existing, extra []string) []string {
-	seen := map[string]bool{orbitTag: true}
-	out := []string{orbitTag}
-	for _, t := range extra {
-		if t == "" || seen[t] {
-			continue
-		}
-		seen[t] = true
-		out = append(out, t)
-	}
-	for _, t := range existing {
-		if seen[t] {
-			continue
-		}
-		seen[t] = true
-		out = append(out, t)
-	}
-	sort.Strings(out)
-	return out
-}
-
-// findExistingRuleByName returns the existing rule of the given name in
-// the BUILD file, or nil if none exists.
-func findExistingRuleByName(f *rule.File, name string) *rule.Rule {
-	if f == nil {
-		return nil
-	}
-	for _, r := range f.Rules {
-		if r.Name() == name {
-			return r
-		}
-	}
-	return nil
 }
 
 // stripExt drops the extension from a path, leaving the directory

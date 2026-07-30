@@ -83,16 +83,6 @@ whatever orbit's blueprint reports.
 Generated rules carry `visibility = ["//visibility:public"]` by
 default; user overrides stick on subsequent runs.
 
-Every plugin-generated rule carries the bare `gazelle_orbit` tag so
-auto-managed targets are obvious in BUILD files and easy to query:
-
-```bash
-bazel query 'attr(tags, "\bgazelle_orbit\b", //...)'
-```
-
-User-added tags survive subsequent gazelle runs — the plugin
-union-merges its marker with whatever's already on the rule.
-
 ## Hand-authored rules (code generators, vendor IP, …)
 
 If a rule's HDL isn't visible to orbit at gazelle time — code generators

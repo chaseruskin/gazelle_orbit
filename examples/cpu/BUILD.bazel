@@ -4,7 +4,6 @@ verilog_library(
     name = "alu",
     srcs = ["alu.sv"],
     library = "cpu",
-    tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = ["//vutils:reg_n"],
 )
@@ -13,7 +12,6 @@ verilog_library(
     name = "cpu_top",
     srcs = ["cpu_top.sv"],
     library = "cpu",
-    tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = [
         ":alu",
@@ -26,7 +24,6 @@ verilog_library(
     name = "timer",
     srcs = ["timer.sv"],
     library = "cpu",
-    tags = ["gazelle_orbit"],
     visibility = ["//visibility:public"],
     deps = [
         # Orbit can't see the build-time-generated params.svh (the

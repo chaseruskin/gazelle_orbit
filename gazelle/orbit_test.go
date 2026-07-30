@@ -70,49 +70,6 @@ func TestParseTagList(t *testing.T) {
 	}
 }
 
-func TestMergeOrbitTag(t *testing.T) {
-	cases := []struct {
-		name     string
-		existing []string
-		extra    []string
-		want     []string
-	}{
-		{
-			name: "orbit marker always present",
-			want: []string{orbitTag},
-		},
-		{
-			name:  "extra tags added and sorted",
-			extra: []string{"no-lint", "no-format"},
-			want:  []string{"gazelle_orbit", "no-format", "no-lint"},
-		},
-		{
-			name:     "existing user tags survive",
-			existing: []string{"my-custom-tag"},
-			want:     []string{"gazelle_orbit", "my-custom-tag"},
-		},
-		{
-			name:     "dedup across all three sources",
-			existing: []string{"no-lint", "gazelle_orbit", "shared"},
-			extra:    []string{"no-lint", "no-format"},
-			want:     []string{"gazelle_orbit", "no-format", "no-lint", "shared"},
-		},
-		{
-			name:  "empty strings ignored",
-			extra: []string{"", "keep"},
-			want:  []string{"gazelle_orbit", "keep"},
-		},
-	}
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			got := mergeOrbitTag(tc.existing, tc.extra)
-			if !reflect.DeepEqual(got, tc.want) {
-				t.Errorf("mergeOrbitTag(existing=%v, extra=%v) = %v, want %v", tc.existing, tc.extra, got, tc.want)
-			}
-		})
-	}
-}
-
 func TestBlueprintUnmarshal(t *testing.T) {
 	raw := []byte(`[
   {
