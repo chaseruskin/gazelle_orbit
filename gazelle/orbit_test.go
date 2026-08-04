@@ -2,8 +2,13 @@ package orbit
 
 import (
 	"encoding/json"
+	"os"
+	"path/filepath"
 	"reflect"
+	"sort"
 	"testing"
+
+	"github.com/bazelbuild/bazel-gazelle/rule"
 )
 
 func TestAssignRuleNames(t *testing.T) {
@@ -67,6 +72,85 @@ func TestParseTagList(t *testing.T) {
 				t.Errorf("parseTagList(%q) = %v, want %v", tc.in, got, tc.want)
 			}
 		})
+	}
+}
+
+func TestStaleGeneratedRules(t *testing.T) {
+	// A tempdir stands in for the BUILD directory. Files that "still
+	// exist" go here; missing files simply aren't created.
+	dir := t.TempDir()
+	writeFile := func(rel string) {
+		t.Helper()
+		abs := filepath.Join(dir, filepath.FromSlash(rel))
+		if err := os.MkdirAll(filepath.Dir(abs), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(abs, nil, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeFile("still_here.vhd")
+	writeFile("sub/still_here.v")
+	writeFile("regenerated.vhd")
+
+	mkRule := func(kind, name string, srcs []string) *rule.Rule {
+		r := rule.NewRule(kind, name)
+		if srcs != nil {
+			r.SetAttr("srcs", srcs)
+		}
+		return r
+	}
+
+	meta := mkRule(kindVhdlLibrary, "meta", nil)
+	meta.SetAttr("deps", []string{"//other:lib"})
+
+	existing := []*rule.Rule{
+		// Sweep: our kind, single src, file removed.
+		mkRule(kindVhdlLibrary, "removed_vhdl", []string{"gone.vhd"}),
+		// Sweep: verilog counterpart.
+		mkRule(kindVerilogLibrary, "removed_verilog", []string{"sub/gone.v"}),
+		// Keep: our kind, single src, file still present.
+		mkRule(kindVhdlLibrary, "still_here", []string{"still_here.vhd"}),
+		mkRule(kindVerilogLibrary, "sub_still_here", []string{"sub/still_here.v"}),
+		// Keep: hand-crafted meta-target (no srcs, deps aggregation).
+		meta,
+		// Keep: hand-crafted multi-src bundle — even with missing files.
+		mkRule(kindVhdlLibrary, "bundle", []string{"still_here.vhd", "also_gone.vhd"}),
+		// Keep: unrelated rule kind, even with a missing single src.
+		mkRule("some_other_library", "not_ours", []string{"gone.vhd"}),
+		// Keep: matches a src we're regenerating this run (merge handles it).
+		mkRule(kindVhdlLibrary, "regenerated", []string{"regenerated.vhd"}),
+		// Keep: single-src but the file happens to still be regenerated
+		// this run under a *different* rule name — the merge index keys on
+		// srcs, so it must not appear in Empty.
+		mkRule(kindVhdlLibrary, "old_name_for_regenerated", []string{"regenerated.vhd"}),
+	}
+
+	owned := []ownedEntry{{relSrc: "regenerated.vhd"}}
+	got := staleGeneratedRules(existing, owned, dir)
+
+	var gotNames []string
+	for _, r := range got {
+		gotNames = append(gotNames, r.Name())
+	}
+	sort.Strings(gotNames)
+
+	want := []string{"removed_verilog", "removed_vhdl"}
+	if !reflect.DeepEqual(gotNames, want) {
+		t.Errorf("staleGeneratedRules names = %v, want %v", gotNames, want)
+	}
+
+	// The stubs must carry the original rule's kind so Gazelle's Empty
+	// matcher can find them by (kind, name) in the existing BUILD.
+	byName := map[string]string{}
+	for _, r := range got {
+		byName[r.Name()] = r.Kind()
+	}
+	if byName["removed_vhdl"] != kindVhdlLibrary {
+		t.Errorf("removed_vhdl kind = %q, want %q", byName["removed_vhdl"], kindVhdlLibrary)
+	}
+	if byName["removed_verilog"] != kindVerilogLibrary {
+		t.Errorf("removed_verilog kind = %q, want %q", byName["removed_verilog"], kindVerilogLibrary)
 	}
 }
 

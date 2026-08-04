@@ -25,6 +25,15 @@ func filesetKind(fileset string) string {
 	}
 }
 
+// ownedEntry is a blueprint entry the plugin has decided this BUILD
+// owns (per the nearest-existing-ancestor rule), paired with its
+// derived rule kind and package-relative srcs path.
+type ownedEntry struct {
+	entry  BlueprintEntry
+	kind   string
+	relSrc string
+}
+
 // GenerateRules implements language.Language.
 //
 // Strategy: for any directory we decide to "own" (per the placement
@@ -44,6 +53,11 @@ func filesetKind(fileset string) string {
 // Cross-package dependencies (blueprint entries whose absolute filepath
 // resolves to a file in another Bazel package) are left as raw filepath
 // import specs and resolved to labels in Resolve().
+//
+// Cleanup: previously-generated rules whose source file was removed or
+// renamed are marked stale via result.Empty. See staleGeneratedRules for
+// the three-condition discriminator that keeps this from touching hand-
+// authored rules.
 func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateResult {
 	cfg := getConfig(args.Config)
 	if cfg.disabled {
@@ -57,83 +71,133 @@ func (*orbitLang) GenerateRules(args language.GenerateArgs) language.GenerateRes
 
 	// Placement gate. If this dir has no BUILD of its own AND some ancestor
 	// already does, defer to the ancestor — its GenerateRules call collects
-	// our HDL via the subtree walk below.
+	// our HDL (and cleans up its stale rules) via the subtree walk below.
 	if args.File == nil && anyAncestorHasBuild(args.Dir, args.Config.RepoRoot, cache) {
 		return language.GenerateResult{}
 	}
 
-	// HDL discovery has to be subtree-aware: this dir may own HDL files in
-	// descendant directories that don't have their own BUILDs.
-	if !hasOwnedHDLInSubtree(args.Dir, cache) {
-		return language.GenerateResult{}
-	}
-
-	entries, err := runOrbitAnalyze(cfg.orbitBin, args.Dir)
-	if err != nil {
-		log.Printf("gazelle_orbit: skipping %s: %v", args.Rel, err)
-		return language.GenerateResult{}
-	}
-
-	// Sort entries by filepath so generated rule order is deterministic
-	// regardless of orbit's internal ordering.
-	sort.SliceStable(entries, func(i, j int) bool {
-		return entries[i].Filepath < entries[j].Filepath
-	})
-
-	// First pass: collect owned entries so we can compute rule names in a
-	// single batch. Name-assignment needs to see every rule at once to
-	// detect basename collisions (see assignRuleNames).
-	type ownedEntry struct {
-		entry  BlueprintEntry
-		kind   string
-		relSrc string
-	}
-	var owned []ownedEntry
-	for _, entry := range entries {
-		kind := filesetKind(entry.Fileset)
-		if kind == "" {
-			// Custom / unrecognized fileset — nothing we can express as a
-			// vhdl_library / verilog_library rule.
-			continue
-		}
-		relSrc, ok := fileUnderBuildOwnership(entry.Filepath, args.Dir, cache)
-		if !ok {
-			continue
-		}
-		owned = append(owned, ownedEntry{entry: entry, kind: kind, relSrc: relSrc})
-	}
-
-	relSrcs := make([]string, 0, len(owned))
-	for _, o := range owned {
-		relSrcs = append(relSrcs, o.relSrc)
-	}
-	names := assignRuleNames(relSrcs)
-
 	result := language.GenerateResult{}
-	for i, o := range owned {
-		entry := o.entry
-		r := rule.NewRule(o.kind, names[i])
-		r.SetAttr("srcs", []string{o.relSrc})
-		r.SetAttr("library", entry.Library)
-		// HDL libraries are almost always consumed across packages
-		// (cpu/dsp depending on primitives, vutils, etc.) so we
-		// default-emit public visibility. If a user wants narrower
-		// scoping they can edit the BUILD file and Gazelle will leave
-		// their override in place.
-		r.SetAttr("visibility", []string{"//visibility:public"})
-		if len(cfg.extraTags) > 0 {
-			r.SetAttr("tags", append([]string(nil), cfg.extraTags...))
+	var owned []ownedEntry
+
+	// Skip the orbit-analyze call when the subtree has no HDL at all —
+	// but keep going so the cleanup sweep below still gets a chance to
+	// remove stale rules from a subtree whose last HDL file was just
+	// deleted.
+	if hasOwnedHDLInSubtree(args.Dir, cache) {
+		entries, err := runOrbitAnalyze(cfg.orbitBin, args.Dir)
+		if err != nil {
+			// Preserve existing rules on analyze failure. A transient
+			// orbit error (missing Orbit.toml mid-refactor, parse blowup,
+			// etc.) shouldn't cascade into a mass rule-deletion.
+			log.Printf("gazelle_orbit: skipping %s: %v", args.Rel, err)
+			return language.GenerateResult{}
 		}
-		result.Gen = append(result.Gen, r)
-		// Blueprint dependencies are absolute filepaths — pass them
-		// through to Resolve() which maps each to the workspace label
-		// whose srcs contain that file.
-		result.Imports = append(result.Imports, ruleImports{
-			deps: append([]string(nil), entry.Dependencies...),
+
+		// Sort entries by filepath so generated rule order is deterministic
+		// regardless of orbit's internal ordering.
+		sort.SliceStable(entries, func(i, j int) bool {
+			return entries[i].Filepath < entries[j].Filepath
 		})
+
+		// First pass: collect owned entries so we can compute rule names
+		// in a single batch. Name-assignment needs to see every rule at
+		// once to detect basename collisions (see assignRuleNames).
+		for _, entry := range entries {
+			kind := filesetKind(entry.Fileset)
+			if kind == "" {
+				// Custom / unrecognized fileset — nothing we can express
+				// as a vhdl_library / verilog_library rule.
+				continue
+			}
+			relSrc, ok := fileUnderBuildOwnership(entry.Filepath, args.Dir, cache)
+			if !ok {
+				continue
+			}
+			owned = append(owned, ownedEntry{entry: entry, kind: kind, relSrc: relSrc})
+		}
+
+		relSrcs := make([]string, 0, len(owned))
+		for _, o := range owned {
+			relSrcs = append(relSrcs, o.relSrc)
+		}
+		names := assignRuleNames(relSrcs)
+
+		for i, o := range owned {
+			entry := o.entry
+			r := rule.NewRule(o.kind, names[i])
+			r.SetAttr("srcs", []string{o.relSrc})
+			r.SetAttr("library", entry.Library)
+			// HDL libraries are almost always consumed across packages
+			// (cpu/dsp depending on primitives, vutils, etc.) so we
+			// default-emit public visibility. If a user wants narrower
+			// scoping they can edit the BUILD file and Gazelle will leave
+			// their override in place.
+			r.SetAttr("visibility", []string{"//visibility:public"})
+			if len(cfg.extraTags) > 0 {
+				r.SetAttr("tags", append([]string(nil), cfg.extraTags...))
+			}
+			result.Gen = append(result.Gen, r)
+			// Blueprint dependencies are absolute filepaths — pass them
+			// through to Resolve() which maps each to the workspace label
+			// whose srcs contain that file.
+			result.Imports = append(result.Imports, ruleImports{
+				deps: append([]string(nil), entry.Dependencies...),
+			})
+		}
+	}
+
+	// Cleanup sweep. Runs whether or not we just generated anything, so a
+	// subtree emptied of HDL still gets its stale rules removed.
+	if args.File != nil {
+		result.Empty = staleGeneratedRules(args.File.Rules, owned, args.Dir)
 	}
 
 	return result
+}
+
+// staleGeneratedRules returns delete-stubs for rules in the current
+// BUILD that were previously generated by this plugin but whose source
+// file no longer exists on disk (i.e., the file was removed or renamed).
+//
+// A rule qualifies as "ours and stale" iff ALL of:
+//  1. Its kind is one we generate (vhdl_library / verilog_library —
+//     same predicate as resolve.go's languageForKind).
+//  2. It has exactly one srcs entry — the plugin's shape. Hand-authored
+//     meta-targets (srcs empty, deps only) and multi-file bundles fall
+//     out here.
+//  3. That srcs entry names a file that no longer exists under buildDir.
+//     A hand-authored single-src rule pointing at a real file is left
+//     alone; only rules whose backing file is gone get swept.
+//
+// `owned` names the entries we're regenerating this run; rules matching
+// one of those are handled by Gazelle's normal merge and must not appear
+// in Empty. Rules explicitly marked `# keep` are honored by Gazelle's
+// merge phase and stay put even when returned here.
+func staleGeneratedRules(existing []*rule.Rule, owned []ownedEntry, buildDir string) []*rule.Rule {
+	generatedSrcs := make(map[string]bool, len(owned))
+	for _, o := range owned {
+		generatedSrcs[o.relSrc] = true
+	}
+	var out []*rule.Rule
+	for _, r := range existing {
+		kind := r.Kind()
+		if languageForKind(kind) == "" {
+			continue
+		}
+		srcs := r.AttrStrings("srcs")
+		if len(srcs) != 1 {
+			continue
+		}
+		if generatedSrcs[srcs[0]] {
+			continue
+		}
+		absSrc := filepath.Join(buildDir, filepath.FromSlash(srcs[0]))
+		if _, err := os.Stat(absSrc); err == nil {
+			continue
+		}
+		out = append(out, rule.NewRule(kind, r.Name()))
+	}
+	return out
 }
 
 // ruleImports is the per-rule data GenerateRules attaches for Resolve()
